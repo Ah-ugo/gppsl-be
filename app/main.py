@@ -1,7 +1,6 @@
 """GPPSL platform API. One FastAPI app, many small modules."""
 
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_settings
 from app.core.db import get_db, init_indexes
+from app.core.storage import upload_folder
 from app.modules.audit.router import router as audit_router
 from app.modules.auth.router import router as auth_router, users_router
 from app.modules.documents.files import router as files_router
@@ -72,8 +72,11 @@ def create_app() -> FastAPI:
     ):
         app.include_router(r)
 
-    Path(s.upload_dir).mkdir(parents=True, exist_ok=True)
-    app.mount("/uploads", StaticFiles(directory=s.upload_dir), name="uploads")
+    folder = upload_folder()
+    try:
+        app.mount("/uploads", StaticFiles(directory=str(folder)), name="uploads")
+    except RuntimeError:
+        pass
     return app
 
 

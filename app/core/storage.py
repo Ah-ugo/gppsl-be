@@ -2,10 +2,31 @@
 import asyncio
 import os
 import re
+import tempfile
 from pathlib import Path
 
 from .common import new_id
 from .config import get_settings
+
+
+def upload_folder() -> Path:
+    """Return a writable folder for uploads.
+
+    On read-only filesystems (e.g. Vercel serverless) fall back to the
+    system temp directory so the app can still start and serve files.
+    """
+    s = get_settings()
+    primary = Path(s.upload_dir)
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+        probe = primary / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return primary
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "gppsl_uploads"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def _safe_name(name: str) -> str:
@@ -16,8 +37,7 @@ async def save_bytes(data: bytes, filename: str, content_type: str = "applicatio
     """Returns {"url", "storage": "cloudinary"|"local"}. Always retains a local copy in uploads/."""
     import io
     s = get_settings()
-    folder = Path(s.upload_dir)
-    folder.mkdir(parents=True, exist_ok=True)
+    folder = upload_folder()
     stored = f"{new_id()}_{_safe_name(filename)}"
     (folder / stored).write_bytes(data)
 
@@ -53,7 +73,7 @@ async def save_bytes(data: bytes, filename: str, content_type: str = "applicatio
 def read_local(url: str) -> bytes | None:
     """Read back a locally stored file from its URL or search uploads for matching filename."""
     marker = "/uploads/"
-    folder = Path(get_settings().upload_dir)
+    folder = upload_folder()
     if marker in url:
         fname = url.split(marker, 1)[1]
         p = folder / fname
