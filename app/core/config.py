@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     demo_mode: bool = True  # enables one-click demo logins. Set false in production.
     timezone: str = "Africa/Lagos"
-    cors_origins: str = "http://localhost:5173,http://localhost:4173"
+    cors_origins: str = "*"
 
     # External services. Every one has a labelled local/mock fallback.
     mistral_api_key: str = ""
@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "models/text-embedding-004"
     cloudinary_url: str = ""
     upload_dir: str = "uploads"
-    public_base_url: str = "http://localhost:8000"
+    public_base_url: str = "https://gppsl-be.vercel.app"
 
     smtp_host: str = ""
     smtp_port: int = 587
