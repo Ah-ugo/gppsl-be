@@ -6,7 +6,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 
-from app.core.common import clean, clean_many, new_id, today, utcnow_iso
+from app.core.common import clean, clean_many, new_id, scoped_branch_query, today, utcnow_iso
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
@@ -133,17 +133,42 @@ async def create_expense(
 @router.get("/expenses")
 async def list_expenses(
     status: Optional[str] = None,
+    branch: Optional[str] = None,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     mine: bool = False,
     project_id: Optional[str] = None,
     user: dict = Depends(require_roles(*ALL)),
 ):
     q: dict[str, Any] = {}
-    if mine or user["role"] not in FIN:
+    user_roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
+    if mine or not (user_roles & set(FIN)):
         q["requester.id"] = user["id"]
-    if status:
+    if status and status.lower() not in ("all", ""):
         q["status"] = status
+    if category and category.lower() not in ("all", ""):
+        q["category"] = category
+    if date_from or date_to:
+        dq = {}
+        if date_from:
+            dq["$gte"] = date_from
+        if date_to:
+            dq["$lte"] = date_to
+        q["date"] = dq
+    if search and search.strip():
+        s = search.strip()
+        q["$or"] = [
+            {"vendor": re.compile(re.escape(s), re.I)},
+            {"notes": re.compile(re.escape(s), re.I)},
+            {"category": re.compile(re.escape(s), re.I)},
+        ]
+    bq = scoped_branch_query(user, branch)
+    if bq:
+        q.update(bq)
     if project_id:
-        if user["role"] not in FIN:
+        if not (user_roles & set(FIN)):
             raise HTTPException(
                 403, "Project costs are visible to finance and management only"
             )
@@ -159,9 +184,10 @@ async def list_expenses(
 @router.get("/expenses/pending")
 async def inbox(user: dict = Depends(require_roles("md", "finance"))):
     """Approvals inbox: only what this role must decide."""
+    user_roles = list(set(user.get("roles") or ([user["role"]] if user.get("role") else [])))
     rows = (
         await get_db()
-        .expenses.find({"status": "pending", "required_approver": user["role"]})
+        .expenses.find({"status": "pending", "required_approver": {"$in": user_roles}})
         .sort("created_at", 1)
         .to_list(500)
     )
@@ -231,6 +257,7 @@ async def list_invoices(
     status: Optional[str] = None,
     client_id: Optional[str] = None,
     open_only: bool = False,
+    trash: bool = False,
     _: dict = Depends(require_roles(*FIN)),
 ):
     q: dict[str, Any] = {}
@@ -238,6 +265,10 @@ async def list_invoices(
         q["client_id"] = client_id
     if status:
         q["status"] = status
+    if not trash:
+        q["deleted_at"] = {"$exists": False}
+    else:
+        q["deleted_at"] = {"$exists": True}
     rows = await get_db().invoices.find(q).sort("issue_date", 1).to_list(5000)
     names = await client_name_map()
     t = today()
@@ -340,15 +371,56 @@ async def delete_invoice(
     inv = await db.invoices.find_one({"_id": invoice_id})
     if not inv:
         raise HTTPException(404, "Invoice not found")
-    await db.invoices.delete_one({"_id": invoice_id})
-    await log(
-        user,
-        "delete",
-        "invoice",
-        invoice_id,
-        f"Deleted invoice {inv.get('number')}",
-        client_ip(request),
+    from app.modules.trash.service import move_to_trash
+    await move_to_trash(
+        collection_name="invoices",
+        item_id=invoice_id,
+        user=user,
+        entity_type="invoice",
+        title=f"Invoice {inv.get('number', invoice_id)}",
+        subtitle=f"₦{inv.get('amount', 0):,.2f} · {inv.get('service_type', 'Services')}",
+        branch=inv.get("branch"),
+        client_ip_addr=client_ip(request),
     )
+    return {"ok": True}
+
+
+@router.delete("/expenses/{expense_id}")
+async def delete_expense(
+    expense_id: str,
+    request: Request,
+    user: dict = Depends(require_roles("md", "admin", "finance")),
+):
+    db = get_db()
+    exp = await db.expenses.find_one({"_id": expense_id})
+    if not exp:
+        raise HTTPException(404, "Expense not found")
+    from app.modules.trash.service import move_to_trash
+    await move_to_trash(
+        collection_name="expenses",
+        item_id=expense_id,
+        user=user,
+        entity_type="expense",
+        title=f"Expense: {exp.get('vendor', 'Unknown')}",
+        subtitle=f"₦{exp.get('amount_ngn', exp.get('amount', 0)):,.2f} · {exp.get('category', 'other')}",
+        branch=exp.get("branch"),
+        client_ip_addr=client_ip(request),
+    )
+    return {"ok": True}
+
+
+@router.post("/invoices/{invoice_id}/restore")
+async def restore_invoice(
+    invoice_id: str,
+    request: Request,
+    user: dict = Depends(require_roles("md", "admin", "finance")),
+):
+    db = get_db()
+    inv = await db.invoices.find_one({"_id": invoice_id})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    await db.invoices.update_one({"_id": invoice_id}, {"$unset": {"deleted_at": ""}})
+    await log(user, "restore", "invoice", invoice_id, f"Restored invoice {inv.get('number')}", client_ip(request))
     return {"ok": True}
 
 

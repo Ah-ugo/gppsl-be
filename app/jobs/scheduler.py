@@ -46,11 +46,22 @@ async def signature_reminder_job() -> int:
     return await remind_pending_signers()
 
 
+async def purge_trash_job() -> int:
+    """Daily: permanently delete invoices trashed > 30 days ago."""
+    from datetime import datetime, timedelta, timezone
+    from app.core.db import get_db
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    db = get_db()
+    res = await db.invoices.delete_many({"deleted_at": {"$lt": cutoff}})
+    return res.deleted_count
+
+
 def start_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=get_settings().timezone)
     scheduler.add_job(daily_summary_job, CronTrigger(hour=19, minute=0), id="daily_summary", replace_existing=True)
     scheduler.add_job(morning_scan_job, CronTrigger(hour=7, minute=0), id="morning_scan", replace_existing=True)
     scheduler.add_job(signature_reminder_job, CronTrigger(hour=9, minute=0), id="signature_reminders", replace_existing=True)
+    scheduler.add_job(purge_trash_job, CronTrigger(hour=2, minute=0), id="purge_trash", replace_existing=True)
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
     return scheduler

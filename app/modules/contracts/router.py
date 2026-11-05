@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.core.common import clean, clean_many, new_id, today, utcnow_iso
+from app.core.common import branch_query, clean, clean_many, new_id, today, utcnow_iso
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
 from app.modules.audit import log
@@ -27,8 +27,7 @@ async def list_tenders(status: Optional[str] = None, branch: Optional[str] = Non
     q: dict[str, Any] = {}
     if status:
         q["status"] = status
-    if branch:
-        q["branch"] = branch
+    q.update(branch_query(branch))
     rows = await get_db().tenders.find(q).sort("submission_deadline", 1).to_list(500)
     t = today()
     result = []

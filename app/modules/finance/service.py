@@ -12,9 +12,16 @@ async def create_expense(body: Any, user: dict[str, Any]) -> dict[str, Any]:
     cfg = await get_settings_doc()
     day = body.date or today().isoformat()
     amount_ngn = body.amount * (cfg["usd_rate"] if body.currency == "USD" else 1)
+    branch = getattr(body, "branch", None)
+    if not branch and body.project_id:
+        proj_doc = await db.projects.find_one({"_id": body.project_id})
+        if proj_doc and proj_doc.get("branch"):
+            branch = proj_doc["branch"]
+    if not branch:
+        branch = user.get("branch") or "Port Harcourt HQ"
     exp = {
         "_id": new_id(), "requester": {"id": user["id"], "name": user["name"], "role": user["role"]},
-        "project_id": body.project_id, "category": body.category, "amount": body.amount, "currency": body.currency,
+        "project_id": body.project_id, "branch": branch, "category": body.category, "amount": body.amount, "currency": body.currency,
         "amount_ngn": round(amount_ngn, 2), "usd_rate": cfg["usd_rate"] if body.currency == "USD" else None,
         "vendor": body.vendor.strip(), "date": day, "receipt_url": body.receipt_url, "notes": body.notes,
         "status": "pending", "required_approver": next_approver(amount_ngn, cfg["approval_limits"]),
@@ -37,7 +44,8 @@ async def decide(expense_id: str, user: dict[str, Any], approve: bool, comment: 
         raise HTTPException(404, "Expense not found")
     if exp["status"] != "pending":
         raise HTTPException(409, f"Expense is already {exp['status']}")
-    if user["role"] != exp["required_approver"]:
+    user_roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
+    if exp["required_approver"] not in user_roles:
         raise HTTPException(403, f"This expense must be decided by: {exp['required_approver'].upper()}")
     if exp["requester"]["id"] == user["id"]:
         raise HTTPException(403, "You cannot decide your own expense")

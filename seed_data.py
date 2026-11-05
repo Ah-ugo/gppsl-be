@@ -62,21 +62,40 @@ def generate(today: date, seed: int = 42) -> dict[str, list[dict[str, Any]]]:
 
     # ---- Users and staff (30 staff; 9 of them have logins, the rest are field crew) ---------
     login_users = [
-        ("md", "Chidi Okonkwo", "Port Harcourt HQ", True), ("admin", "Amaka Nwachukwu", "Port Harcourt HQ", True),
-        ("finance", "Tolu Adebayo", "Port Harcourt HQ", True), ("supervisor", "Emeka Okafor", "Port Harcourt HQ", True),
-        ("storekeeper", "Ibrahim Danladi", "Port Harcourt HQ", True), ("hr", "Ngozi Eze", "Port Harcourt HQ", True),
-        ("supervisor", "Tamuno Briggs", "Warri", False), ("supervisor", "Hauwa Sule", "Abuja", False),
+        ("md", "Chidi Okonkwo", "Port Harcourt HQ", True),
+        ("admin", "Amaka Nwachukwu", "Port Harcourt HQ", True),
+        ("finance", "Tolu Adebayo", "Port Harcourt HQ", True),
+        ("supervisor", "Emeka Okafor", "Port Harcourt HQ", True),
+        ("storekeeper", "Ibrahim Danladi", "Port Harcourt HQ", True),
+        ("hr", "Ngozi Eze", "Port Harcourt HQ", True),
+        ("staff", "Chinedu Nwosu", "Port Harcourt HQ", True),
+        ("finance", "Funmi Balogun", "Port Harcourt HQ", False),
+        ("hr", "Blessing Okoro", "Warri", False),
+        ("admin", "Segun Adeyemi", "Abuja", False),
+        ("supervisor", "Tamuno Briggs", "Warri", False),
+        ("supervisor", "Hauwa Sule", "Abuja", False),
         ("storekeeper", "Segun Ajayi", "Warri", False),
     ]
     users, staff, used = [], [], set()
-    roster: list[tuple[str, str, str, str | None]] = []  # (name, branch, position, user_id)
+    roster: list[tuple[str, str, str, str | None, str, list[str]]] = []  # (name, branch, position, user_id, email, roles)
+    role_titles = {
+        "md": "Managing Director",
+        "admin": "Administrator",
+        "finance": "Finance Officer",
+        "supervisor": "Site Supervisor",
+        "storekeeper": "Storekeeper",
+        "hr": "HR Officer",
+        "staff": "Field Operator",
+    }
     for role, name, branch, demo in login_users:
-        u = {"_id": uid(), "email": f"{role}@gppsl.demo" if demo else f"{name.split()[0].lower()}.{name.split()[1].lower()}@gppsl.demo",
-             "name": name, "role": role, "branch": branch, "phone": f"0803{rnd.randint(1000000, 9999999)}", "active": True, "demo": demo}
+        user_roles = [role, "staff"] if role != "staff" else ["staff"]
+        u_id = uid()
+        email = f"{role}@gppsl.demo" if demo else f"{name.split()[0].lower()}.{name.split()[1].lower()}@gppsl.demo"
+        u = {"_id": u_id, "email": email, "name": name, "role": role, "roles": user_roles, "branch": branch,
+             "phone": f"0803{rnd.randint(1000000, 9999999)}", "active": True, "demo": demo}
         users.append(u)
         used.add(name)
-        roster.append((name, branch, {"md": "Managing Director", "admin": "Administrator", "finance": "Finance Officer",
-                                      "supervisor": "Site Supervisor", "storekeeper": "Storekeeper", "hr": "HR Officer"}[role], u["_id"]))
+        roster.append((name, branch, role_titles.get(role, "Field Staff"), u_id, email, user_roles))
     crew_positions = ["Pump operator", "Rigger", "Technician", "Fitter", "Driver", "HSE officer", "Welder", "Jetting operator"]
     i = 0
     while len(roster) < 30:
@@ -85,18 +104,51 @@ def generate(today: date, seed: int = 42) -> dict[str, list[dict[str, Any]]]:
         if name in used:
             continue
         used.add(name)
-        roster.append((name, BRANCHES[len(roster) % 3] if len(roster) % 5 else "Port Harcourt HQ", rnd.choice(crew_positions), None))
+        branch = BRANCHES[len(roster) % 3] if len(roster) % 5 else "Port Harcourt HQ"
+        pos = rnd.choice(crew_positions)
+        u_id = uid()
+        email = f"{name.split()[0].lower()}.{name.split()[1].lower()}@gppsl.demo"
+        user_roles = ["staff"]
+        phone = f"080{rnd.choice([3, 5, 6, 8])}{rnd.randint(1000000, 9999999)}"
+        u = {
+            "_id": u_id,
+            "email": email,
+            "name": name,
+            "role": "staff",
+            "roles": user_roles,
+            "branch": branch,
+            "phone": phone,
+            "active": True,
+            "demo": False,
+        }
+        users.append(u)
+        roster.append((name, branch, pos, u_id, email, user_roles))
 
     site_by_branch = {s["branch"]: s for s in SITES}
-    for idx, (name, branch, position, user_id) in enumerate(roster):
+    for idx, (name, branch, position, user_id, email, user_roles) in enumerate(roster):
         certs = []
         for ctype in CERT_TYPES:
             if rnd.random() < 0.8 or ctype == "H2S":
                 certs.append({"type": ctype, "expiry": iso(today + timedelta(days=rnd.randint(90, 700)))})
-        staff.append({"_id": uid(), "user_id": user_id, "name": name, "position": position, "branch": branch,
-                      "phone": f"080{rnd.choice([3, 5, 6, 8])}{rnd.randint(1000000, 9999999)}", "daily_rate": rnd.choice([12_000, 15_000, 18_000, 25_000]),
-                      "face_template": [], "face_consent": {"given": False, "date": None}, "face_status": "none",
-                      "certifications": certs, "home_site": site_by_branch[branch]["name"] if branch in site_by_branch else SITES[0]["name"]})
+        staff.append({
+            "_id": uid(),
+            "user_id": user_id,
+            "name": name,
+            "email": email,
+            "position": position,
+            "branch": branch,
+            "branch_access": ["all"],
+            "roles": user_roles,
+            "department": "Finance" if "finance" in user_roles else ("HR" if "hr" in user_roles else ("Administration" if "admin" in user_roles else "Operations")),
+            "employment_type": "contract" if "technician" in position.lower() or "rigger" in position.lower() else "permanent",
+            "phone": f"080{rnd.choice([3, 5, 6, 8])}{rnd.randint(1000000, 9999999)}",
+            "daily_rate": rnd.choice([12_000, 15_000, 18_000, 25_000]),
+            "face_template": [],
+            "face_consent": {"given": False, "date": None},
+            "face_status": "none",
+            "certifications": certs,
+            "home_site": site_by_branch[branch]["name"] if branch in site_by_branch else SITES[0]["name"],
+        })
     # deliberate demo cases: expired / expiring certificates
     def cert(s, ctype, days):
         for c in s["certifications"]:

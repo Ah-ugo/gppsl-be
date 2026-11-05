@@ -142,9 +142,17 @@ async def delete_document(doc_id: str, request: Request, user: dict = Depends(re
     doc = await get_doc(doc_id, user)
     if doc["status"] == "Awaiting signature":
         raise HTTPException(409, "Cancel the signature request first")
-    await get_db().documents.delete_one({"_id": doc_id})
-    await get_db().document_chunks.delete_many({"document_id": doc_id})
-    await log(user, "delete", "document", doc_id, f"Deleted document {doc['name']}", client_ip(request))
+    from app.modules.trash.service import move_to_trash
+    await move_to_trash(
+        collection_name="documents",
+        item_id=doc_id,
+        user=user,
+        entity_type="document",
+        title=f"Doc: {doc.get('name')}",
+        subtitle=f"{doc.get('category', 'Document')} · {doc.get('status', '')}",
+        branch=doc.get("branch"),
+        client_ip_addr=client_ip(request),
+    )
     return {"ok": True}
 
 

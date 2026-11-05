@@ -23,7 +23,7 @@ def lagos(dt: datetime) -> datetime:
     return dt.astimezone(ZoneInfo(get_settings().timezone))
 
 
-def public_staff(s: dict[str, Any], include_templates: bool = False) -> dict[str, Any]:
+def public_staff(s: dict[str, Any], include_templates: bool = False, user: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     out = clean(s)
     out["face_registered"] = bool(s.get("face_template"))
     if "branch_access" not in out or not out["branch_access"]:
@@ -31,13 +31,57 @@ def public_staff(s: dict[str, Any], include_templates: bool = False) -> dict[str
     if not include_templates:
         out.pop("face_template", None)  # biometric descriptors never leave the server in lists
         out.pop("face_pending", None)
+    if user:
+        out["has_login"] = True
+        out["login_email"] = user.get("email")
+        out["login_active"] = user.get("active", True)
+        out["roles"] = user.get("roles") or ([user.get("role")] if user.get("role") else ["staff"])
+        out["role"] = user.get("role") or (out["roles"][0] if out["roles"] else "staff")
+    else:
+        out["has_login"] = bool(s.get("user_id"))
+        out["login_email"] = s.get("email")
+        out["roles"] = s.get("roles") or ([s.get("role")] if s.get("role") else [])
+        out["role"] = s.get("role") or (out["roles"][0] if out["roles"] else None)
     return out
 
 
 async def my_staff(user: dict[str, Any]) -> dict[str, Any]:
-    s = await get_db().staff.find_one({"user_id": user["id"]})
+    db = get_db()
+    uid = user.get("id") or user.get("_id")
+    s = await db.staff.find_one({"user_id": uid})
+    if not s and user.get("email"):
+        s = await db.staff.find_one({"email": user["email"].strip().lower()})
+        if s:
+            await db.staff.update_one({"_id": s["_id"]}, {"$set": {"user_id": uid}})
+    if not s and user.get("phone"):
+        s = await db.staff.find_one({"phone": user["phone"]})
+        if s:
+            await db.staff.update_one({"_id": s["_id"]}, {"$set": {"user_id": uid}})
     if not s:
-        raise HTTPException(404, "No staff profile is linked to your account. Ask HR to create one.")
+        roles = user.get("roles") or ([user.get("role")] if user.get("role") else ["staff"])
+        primary_role = user.get("role") or (roles[0] if roles else "staff")
+        s = {
+            "_id": new_id(),
+            "user_id": uid,
+            "name": user.get("name") or "Staff Member",
+            "email": user.get("email"),
+            "phone": user.get("phone"),
+            "branch": user.get("branch") or "Port Harcourt HQ",
+            "branch_access": ["all"],
+            "position": {"md": "Managing Director", "admin": "System Administrator", "finance": "Finance Officer",
+                         "hr": "HR Officer", "supervisor": "Site Supervisor", "storekeeper": "Storekeeper",
+                         "branch_manager": "Branch Manager", "staff": "Field Staff"}.get(primary_role, "Field Staff"),
+            "department": {"finance": "Finance", "hr": "HR", "admin": "Administration",
+                           "storekeeper": "Logistics", "supervisor": "Operations", "staff": "Operations"}.get(primary_role, "Operations"),
+            "employment_type": "permanent",
+            "daily_rate": 15000,
+            "face_template": [],
+            "face_consent": {"given": False, "date": None},
+            "face_status": "none",
+            "certifications": [],
+            "created_at": utcnow_iso(),
+        }
+        await db.staff.insert_one(s)
     return s
 
 

@@ -2,7 +2,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.core.common import clean, clean_many, new_id, utcnow_iso
+from app.core.common import branch_query, clean, clean_many, new_id, scoped_branch_query, utcnow_iso
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
 from app.modules.audit import log
@@ -41,17 +41,26 @@ async def update_client(client_id: str, body: ClientUpdate, request: Request,
     return clean(await get_db().clients.find_one({"_id": client_id}))
 
 
+def _eff_role(user: dict[str, Any]) -> str:
+    roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
+    for r in ("md", "admin", "finance", "supervisor"):
+        if r in roles:
+            return r
+    return user.get("role", "staff")
+
+
 # ---- Projects -------------------------------------------------------------------------------
 @router.get("/projects")
 async def list_projects(status: Optional[str] = None, branch: Optional[str] = None, user: dict = Depends(require_roles(*ALL))):
     q: dict[str, Any] = {}
-    if status:
+    if status and status.lower() not in ("all", ""):
         q["status"] = status
-    if branch:
-        q["branch"] = branch
+    bq = scoped_branch_query(user, branch)
+    if bq:
+        q.update(bq)
     rows = await get_db().projects.find(q).sort("name", 1).to_list(1000)
     names = await service.client_name_map()
-    return [await service.view(r, user["role"], names) for r in rows]
+    return [await service.view(r, _eff_role(user), names) for r in rows]
 
 
 @router.post("/projects", status_code=201)
@@ -61,7 +70,7 @@ async def create_project(body: ProjectIn, request: Request, user: dict = Depends
     doc = {"_id": new_id(), **body.model_dump(), "created_at": utcnow_iso()}
     await get_db().projects.insert_one(doc)
     await log(user, "create", "project", doc["_id"], f"Created project {body.name}", client_ip(request))
-    return await service.view(doc, user["role"], await service.client_name_map())
+    return await service.view(doc, _eff_role(user), await service.client_name_map())
 
 
 @router.get("/projects/{project_id}")
@@ -69,14 +78,15 @@ async def get_project(project_id: str, user: dict = Depends(require_roles(*ALL))
     p = await get_db().projects.find_one({"_id": project_id})
     if not p:
         raise HTTPException(404, "Project not found")
-    return await service.view(p, user["role"], await service.client_name_map())
+    return await service.view(p, _eff_role(user), await service.client_name_map())
 
 
 @router.patch("/projects/{project_id}")
 async def update_project(project_id: str, body: ProjectUpdate, request: Request,
                          user: dict = Depends(require_roles("md", "admin", "supervisor"))):
     patch = body.model_dump(exclude_none=True)
-    if user["role"] == "supervisor":  # supervisors may only update progress and status
+    user_roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
+    if not (user_roles & {"md", "admin"}):  # non-admins may only update progress and status
         patch = {k: v for k, v in patch.items() if k in ("progress", "status")}
     if not patch:
         raise HTTPException(422, "Nothing to update")
@@ -85,7 +95,7 @@ async def update_project(project_id: str, body: ProjectUpdate, request: Request,
         raise HTTPException(404, "Project not found")
     await log(user, "update", "project", project_id, f"Updated project: {', '.join(patch)}", client_ip(request))
     p = await get_db().projects.find_one({"_id": project_id})
-    return await service.view(p, user["role"], await service.client_name_map())
+    return await service.view(p, _eff_role(user), await service.client_name_map())
 
 
 @router.delete("/projects/{project_id}")
@@ -95,6 +105,15 @@ async def delete_project(project_id: str, request: Request, user: dict = Depends
         raise HTTPException(404, "Project not found")
     if await get_db().rentals.find_one({"project_id": project_id, "actual_return": None}):
         raise HTTPException(409, "Project has equipment still deployed")
-    await get_db().projects.delete_one({"_id": project_id})
-    await log(user, "delete", "project", project_id, f"Deleted project {p['name']}", client_ip(request))
+    from app.modules.trash.service import move_to_trash
+    await move_to_trash(
+        collection_name="projects",
+        item_id=project_id,
+        user=user,
+        entity_type="project",
+        title=f"Project: {p.get('name')}",
+        subtitle=f"Status: {p.get('status', 'active')} · {p.get('branch', '')}",
+        branch=p.get("branch"),
+        client_ip_addr=client_ip(request),
+    )
     return {"ok": True}

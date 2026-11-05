@@ -10,6 +10,7 @@ CATEGORIES = [
 
 class ExpenseIn(BaseModel):
     project_id: Optional[str] = None
+    branch: Optional[str] = None
     category: str = "other"
     amount: float = Field(gt=0)
     currency: Literal["NGN", "USD"] = "NGN"

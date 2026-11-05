@@ -2,7 +2,7 @@
 from datetime import timedelta
 from typing import Any, Optional
 
-from app.core.common import clean_many, today
+from app.core.common import branch_query, clean_many, resolve_branch, scoped_branch_query, today
 from app.core.db import get_db
 from app.core.settings_store import get_settings_doc
 from app.logic import certificate_status, utilisation_pct
@@ -16,11 +16,11 @@ def _sev(level: str) -> int:
     return {"high": 0, "medium": 1, "low": 2}[level]
 
 
-async def alerts(branch: Optional[str] = None) -> list[dict[str, Any]]:
+async def alerts(branch: Optional[str] = None, user: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     db = get_db()
     t = today()
     out: list[dict[str, Any]] = []
-    eq_q = {"branch": branch} if branch else {}
+    eq_q = scoped_branch_query(user, branch)
     equipment = await db.equipment.find(eq_q).to_list(2000)
     for e in equipment:
         interval = float(e.get("service_interval_hours") or 0)
@@ -41,7 +41,7 @@ async def alerts(branch: Optional[str] = None) -> list[dict[str, Any]]:
             out.append({"type": "invoice_overdue", "severity": "high" if invoice_age_days(inv, t) > 90 else "medium",
                         "title": f"Invoice {inv.get('number')} overdue {invoice_age_days(inv, t)} days",
                         "detail": f"₦{outstanding_amount(inv):,.0f} outstanding", "link": "/finance"})
-    staff_q = {"branch": branch} if branch else {}
+    staff_q = scoped_branch_query(user, branch)
     for s in await db.staff.find(staff_q).to_list(2000):
         for c in s.get("certifications") or []:
             st = certificate_status(c.get("expiry"), t)
@@ -49,7 +49,9 @@ async def alerts(branch: Optional[str] = None) -> list[dict[str, Any]]:
                 out.append({"type": "staff_certificate", "severity": "high" if st == "red" else "low",
                             "title": f"{s.get('name', 'Staff')}: {c['type']} {'expired' if st == 'red' else 'expiring'}",
                             "detail": f"Expiry {c['expiry']}", "link": "/staff"})
-    flagged = await db.attendance.count_documents({"date": t.isoformat(), "status": "flagged"})
+    att_q = {"date": t.isoformat(), "status": "flagged"}
+    att_q.update(scoped_branch_query(user, branch))
+    flagged = await db.attendance.count_documents(att_q)
     if flagged:
         out.append({"type": "attendance_flagged", "severity": "medium", "title": f"{flagged} flagged clock-in(s) today",
                     "detail": "Waiting for supervisor review", "link": "/attendance"})
@@ -57,11 +59,12 @@ async def alerts(branch: Optional[str] = None) -> list[dict[str, Any]]:
     return out
 
 
-async def attendance_summary(branch: Optional[str] = None) -> dict[str, Any]:
+async def attendance_summary(branch: Optional[str] = None, user: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     db = get_db()
     t = today().isoformat()
     cfg = await get_settings_doc()
-    staff = await db.staff.find({"branch": branch} if branch else {}).to_list(5000)
+    resolved = resolve_branch(branch)
+    staff = await db.staff.find(scoped_branch_query(user, resolved)).to_list(5000)
     ids = {s["_id"] for s in staff}
     recs = [r for r in await db.attendance.find({"date": t}).to_list(5000) if r["staff_id"] in ids]
     present = [r for r in recs if r.get("clock_in") and r.get("status") != "rejected"]
@@ -78,23 +81,23 @@ async def attendance_summary(branch: Optional[str] = None) -> dict[str, Any]:
     names = {s["_id"]: s.get("branch") for s in staff}
     all_staff = await db.staff.find({}).to_list(5000)
     for b in sorted({s.get("branch") for s in all_staff if s.get("branch")}):
-        out["by_branch"][b] = sum(1 for r in present if names.get(r["staff_id"]) == b) if not branch else (len(present) if b == branch else 0)
+        out["by_branch"][b] = sum(1 for r in present if names.get(r["staff_id"]) == b) if not resolved else (len(present) if b == resolved else 0)
     out["text"] = f"Today: {out['present']} present, {out['late']} late, {out['absent']} absent, {out['flagged']} flagged"
     return out
 
 
-async def build(role: str, branch: Optional[str] = None) -> dict[str, Any]:
+async def build(role: str, branch: Optional[str] = None, user: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     db = get_db()
     t = today()
-    eq_q = {"branch": branch} if branch else {}
+    resolved = resolve_branch(branch)
+    eq_q = scoped_branch_query(user, resolved)
     equipment = await db.equipment.find(eq_q).to_list(2000)
     counts = {s: 0 for s in ("available", "deployed", "in_transit", "maintenance")}
     for e in equipment:
         counts[e.get("status", "available")] = counts.get(e.get("status", "available"), 0) + 1
 
     proj_q: dict[str, Any] = {"status": "active"}
-    if branch:
-        proj_q["branch"] = branch
+    proj_q.update(scoped_branch_query(user, resolved))
     projects = await db.projects.find(proj_q).to_list(500)
     names = await proj.client_name_map()
     active_projects = []
@@ -103,9 +106,9 @@ async def build(role: str, branch: Optional[str] = None) -> dict[str, Any]:
     order = {"RED": 0, "AMBER": 1, "GREEN": 2}
     active_projects.sort(key=lambda p: order[p["colour"]])
 
-    project_ids = {p["_id"] for p in await db.projects.find({"branch": branch} if branch else {}).to_list(1000)}
+    project_ids = {p["_id"] for p in await db.projects.find(scoped_branch_query(user, resolved)).to_list(1000)}
     invoices = await db.invoices.find({}).to_list(20000)
-    if branch:
+    if resolved:
         invoices = [i for i in invoices if i.get("project_id") in project_ids]
 
     pending = await db.expenses.find({"status": "pending", "required_approver": "md" if role in ("md", "admin") else role}).sort("created_at", 1).to_list(50)
@@ -113,10 +116,10 @@ async def build(role: str, branch: Optional[str] = None) -> dict[str, Any]:
     from app.modules.finance.service import view as expense_view
 
     recent = await db.audit_log.find({}).sort("timestamp", -1).limit(12).to_list(12)
-    al = await alerts(branch)
+    al = await alerts(resolved, user=user)
     return {
         "generated_at": t.isoformat(),
-        "branch": branch or "All branches",
+        "branch": resolved or "All branches",
         "cash": await fin.cash_position(),
         "receivables": round(sum(outstanding_amount(i) for i in invoices if is_open(i)), 2),
         "payables": await fin.payables_total(),
@@ -128,14 +131,14 @@ async def build(role: str, branch: Optional[str] = None) -> dict[str, Any]:
         "pending_approvals": [expense_view(e, pnames) for e in pending],
         "alerts": al,
         "alert_counts": {s: sum(1 for a in al if a["severity"] == s) for s in ("high", "medium", "low")},
-        "attendance": await attendance_summary(branch),
+        "attendance": await attendance_summary(resolved, user=user),
         "recent_activity": clean_many(recent),
     }
 
 
-async def daily_summary(branch: Optional[str] = None) -> str:
+async def daily_summary(branch: Optional[str] = None, user: Optional[dict[str, Any]] = None) -> str:
     """Deterministic plain-text summary built from real data. The AI module can rewrite it in prose."""
-    d = await build("md", branch)
+    d = await build("md", branch, user=user)
     lines = [f"GPPSL daily summary, {d['generated_at'][8:10]}/{d['generated_at'][5:7]}/{d['generated_at'][:4]} ({d['branch']})",
              f"Cash ₦{d['cash']:,.0f}. Receivables ₦{d['receivables']:,.0f} (90+ days: ₦{d['ageing']['90+']:,.0f}). Payables ₦{d['payables']:,.0f}.",
              f"Equipment: {d['equipment_counts']['deployed']} deployed, {d['equipment_counts']['available']} available, "

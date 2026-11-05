@@ -1,26 +1,28 @@
-"""AI assistant service. Order of work:
-1. Handle greetings / capability queries warmly and role-specifically.
-2. Handle executive / MD remote business monitoring queries directly from live operational data.
-3. Route domain questions to role-filtered database queries.
-4. Add high-confidence document excerpts (RAG) only if genuinely relevant.
-5. If an LLM key exists, let the model synthesize the answer from verified data; otherwise return structured data.
+"""AI assistant service.
+
+1. Greetings / thanks / platform FAQs are answered instantly (free, deterministic).
+2. With an LLM key: an agent decides which role-filtered live tools to call, chains them, and analyses the results.
+   Provider priority: Mistral → Gemini fallback (handled inside llm.run_agent).
+3. Without any key (or if all providers fail): the regex router + verified-data fallback.
 """
 
-import re
+import logging
 from typing import Any, Optional
 
 from app.core.common import today
 from app.core.db import get_db
 from app.core.settings_store import get_settings_doc
-from app.logic.ai_router import analyse_prompt, route
+from app.logic.ai_router import analyse_prompt
 from app.modules.dashboard import service as dash
 from app.modules.documents import service as docs
 
 from . import llm, tools
 
+log = logging.getLogger(__name__)
+
 NOT_FOUND = "I couldn't find specific database records or documents matching your query."
 MOCK_NOTE = "GPPSL Verified Operations Intelligence (deterministic verified database layer)."
-
+DEGRADED_NOTE = "The AI model is temporarily unavailable, so this answer shows verified data only."
 
 
 def _greeting_response(user: dict[str, Any]) -> str:
@@ -51,72 +53,116 @@ async def _context(user: dict) -> tuple[list[str], list[str]]:
     return projects, branches
 
 
+def _reply(answer: str, analysis: dict, **extra: Any) -> dict[str, Any]:
+    out = {
+        "answer": answer,
+        "sources": [],
+        "table": None,
+        "chart": None,
+        "mode": "gppsl-assistant",
+        "note": None,
+        "analysis": analysis,
+    }
+    out.update(extra)
+    return out
+
+
 async def chat(
     question: str, history: list[dict[str, str]], user: dict[str, Any]
 ) -> dict[str, Any]:
-    cleaned_q = question.strip()
+    q = question.strip()
     projects, branches = await _context(user)
+    analysis = analyse_prompt(q, today(), projects, branches, user)
 
-    # STEP 1: Deep analysis and understanding of prompt before deciding source allocation
-    analysis = analyse_prompt(cleaned_q, today(), projects, branches, user)
-
-    # 1. Conversational greeting
+    # Instant, free answers
     if analysis.get("is_greeting"):
-        return {
-            "answer": _greeting_response(user),
-            "sources": [],
-            "table": None,
-            "chart": None,
-            "mode": "gppsl-assistant",
-            "note": None,
-            "analysis": analysis,
-        }
-
-    # 1b. Conversational reply (Gratitude, Acknowledgment, Farewell, Platform FAQs)
+        return _reply(_greeting_response(user), analysis)
     if analysis.get("conversational_reply"):
-        return {
-            "answer": analysis["conversational_reply"],
-            "sources": [],
-            "table": None,
-            "chart": None,
-            "mode": "gppsl-assistant",
-            "note": None,
-            "analysis": analysis,
-        }
+        return _reply(analysis["conversational_reply"], analysis)
 
-    # 2. Executive / MD remote operations telemetry
+    # Smart path: LLM agent decides what to look up (Mistral → Gemini fallback handled in llm)
+    if llm.available():
+        try:
+            return await _agent_answer(q, history, user, projects, branches, analysis)
+        except Exception:
+            log.exception("All LLM providers failed; falling back to data-only mode")
+            return await _data_answer(q, user, analysis, degraded=True)
+
+    return await _data_answer(q, user, analysis)
+
+
+async def _agent_answer(
+    q: str,
+    history: list[dict[str, str]],
+    user: dict[str, Any],
+    projects: list[str],
+    branches: list[str],
+    analysis: dict[str, Any],
+) -> dict[str, Any]:
+    used: list[dict[str, Any]] = []
+
+    async def run_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        used.append({"tool": name, "args": args})
+        return await tools.run(name, args, user)
+
+    specs = [s for s in tools.TOOL_SPECS if tools.allowed(s["name"], user)]
+    system = llm.build_system_prompt(user, today().isoformat(), branches, projects)
+    answer, results = await llm.run_agent(q, history, specs, run_tool, system)
+
+    live = [r for r in results if not r.get("denied")]
+    sources: list[dict[str, Any]] = []
+    for r in live:
+        sources += r.get("sources", [])
+
+    analysis = {
+        **analysis,
+        "intent": "ai_agent",
+        "intent_label": "AI Agent (live data tools)",
+        "understanding": f"{llm.provider_name().title()} analysed the question and queried {len(used)} live source(s).",
+        "allocated_source": f"{llm.provider_name().title()} agent + role-filtered live tools",
+        "target_store": ", ".join(u["tool"] for u in used) or "no data lookup needed",
+        "reasoning": "The model chose and chained tools itself based on the question and your role.",
+        "tool_calls": used,
+    }
+    return {
+        "answer": answer,
+        "sources": _dedupe(sources)[:14],
+        "table": next((r["table"] for r in live if r.get("table")), None),
+        "chart": next((r["chart"] for r in live if r.get("chart")), None),
+        "mode": llm.provider_name(),
+        "note": None,
+        "analysis": analysis,
+    }
+
+
+async def _data_answer(
+    q: str, user: dict[str, Any], analysis: dict[str, Any], degraded: bool = False
+) -> dict[str, Any]:
+    """No-LLM fallback: regex-routed tools + verified document excerpts."""
+    note = DEGRADED_NOTE if degraded else MOCK_NOTE
+
     if analysis.get("is_md_monitoring"):
         summary_text = await dash.daily_summary()
         return {
             "answer": (
-                f"### 🏢 GPPSL Executive Remote Operations Briefing\n\n"
+                "### 🏢 GPPSL Executive Remote Operations Briefing\n\n"
                 f"{summary_text}\n\n"
                 "*You can drill into any project, branch location, invoice, or equipment unit for deeper real-time telemetry.*"
             ),
-            "sources": [
-                {
-                    "type": "system",
-                    "id": "dashboard",
-                    "label": "Live GPPSL Operations Database",
-                }
-            ],
+            "sources": [{"type": "system", "id": "dashboard", "label": "Live GPPSL Operations Database"}],
             "table": None,
             "chart": None,
-            "mode": "gppsl-assistant",
-            "note": None,
+            "mode": "data",
+            "note": note,
             "analysis": analysis,
         }
 
-    # STEP 2: Execute allocated retrieval based on understanding
     calls = analysis.get("tool_calls", [])
-    results: list[dict[str, Any]] = []
-    for c in calls:
-        results.append(await tools.run(c["tool"], c["args"], user))
+    results = [await tools.run(c["tool"], c["args"], user) for c in calls]
 
-    excerpts = []
-    # If the analysis identified technical/SOP/manuals or no direct DB calls matched, query verified document chunks
-    if (analysis.get("requires_docs") or not calls) and len(cleaned_q.split()) >= 2:
-        excerpts = await docs.search_chunks(question, user, k=4)
+    excerpts: list[dict[str, Any]] = []
+    if (analysis.get("requires_docs") or not calls) and len(q.split()) >= 2:
+        excerpts = await docs.search_chunks(q, user, k=4)
 
     sources: list[dict[str, Any]] = []
     for r in results:
@@ -132,97 +178,43 @@ async def chat(
             "sources": [],
             "table": None,
             "chart": None,
-            "mode": "data" if not llm.available() else llm.provider_name(),
-            "note": MOCK_NOTE if not llm.available() else None,
+            "mode": "data",
+            "note": note,
             "analysis": analysis,
         }
 
-    table = next((r["table"] for r in live if r.get("table")), None)
-    chart = next((r["chart"] for r in live if r.get("chart")), None)
-
-    if llm.available():
-        answer = await _mistral_answer(question, history, user, live, excerpts)
-        note = None
-        mode = llm.provider_name()
+    if live:
+        answer = "\n\n".join(r["text"] for r in live)
+    elif excerpts:
+        answer = "From verified company documents:\n" + "\n".join(
+            f"- **{e['name']}**: {e['text'][:350].strip()}" for e in excerpts
+        )
     else:
-        mode = "data"
-        if live:
-            answer = "\n\n".join(r["text"] for r in live)
-        elif excerpts:
-            answer = "From verified company documents:\n" + "\n".join(
-                f"- **{e['name']}**: {e['text'][:350].strip()}" for e in excerpts
-            )
-        else:
-            answer = (
-                f"I looked across our live operational database (projects, equipment, staff, finances, attendance, and technical manuals), "
-                f"but didn't find specific records matching **\"{cleaned_q}\"**.\n\n"
-                "**Here are quick questions you can ask me right now:**\n"
-                "• 📊 *\"List my expenditures\"* or *\"What is our cash balance and overdue receivables?\"*\n"
-                "• 🚜 *\"Where is the nitrogen unit?\"* or *\"Show equipment in maintenance\"*\n"
-                "• 👥 *\"Who is clocked in at Warri base today?\"* or *\"Who is my best staff?\"*\n"
-                "• 🏗️ *\"Give me an executive operations summary for the MD\"*\n"
-                "• ❓ *\"How to clock in\"* or *\"Update project progress\"*"
-            )
-            sources = []  # Do not attach random sources if nothing matched
-        note = MOCK_NOTE
+        answer = (
+            f"I looked across our live operational database but didn't find specific records matching **\"{q}\"**.\n\n"
+            "**Here are quick questions you can ask me right now:**\n"
+            "• 📊 *\"List my expenditures\"* or *\"What is our cash balance and overdue receivables?\"*\n"
+            "• 🚜 *\"Where is the nitrogen unit?\"* or *\"Show equipment in maintenance\"*\n"
+            "• 👥 *\"Who is clocked in at Warri base today?\"* or *\"Who is my best staff?\"*\n"
+            "• 🏗️ *\"Give me an executive operations summary for the MD\"*"
+        )
+        sources = []
 
     return {
         "answer": answer,
         "sources": _dedupe(sources)[:14],
-        "table": table,
-        "chart": chart,
-        "mode": mode,
+        "table": next((r["table"] for r in live if r.get("table")), None),
+        "chart": next((r["chart"] for r in live if r.get("chart")), None),
+        "mode": "data",
         "note": note,
         "analysis": analysis,
     }
 
 
-async def _mistral_answer(
-    question: str,
-    history: list[dict[str, str]],
-    user: dict,
-    live: list[dict],
-    excerpts: list[dict],
-) -> str:
-    """Uses Mistral to synthesize an authoritative, smart answer from verified live database facts."""
-    pre = "\n\n".join(r["text"] for r in live if r.get("text"))
-    doc_context = "\n\n".join(f"[{e['name']}]\n{e['text']}" for e in excerpts)
-
-    combined_facts = ""
-    if pre:
-        combined_facts += f"Verified Operational Data:\n{pre}\n\n"
-    if doc_context:
-        combined_facts += f"Verified Company Documents:\n{doc_context}\n\n"
-
-    # If verified live data or document excerpts were already extracted:
-    if combined_facts:
-        try:
-            instruction = (
-                f"Answer the user's prompt '{question}' warmly and directly for a user with role '{user.get('role', 'staff')}'. "
-                f"Synthesize the answer based strictly on the verified operational data provided below. "
-                f"Be specific with names, branches, percentages, amounts, and dates. "
-                f"Do not invent facts or mention tool calls."
-            )
-            return await llm.rewrite(instruction, combined_facts)
-        except Exception:
-            return pre or (f"From verified documents:\n{doc_context[:500]}") or NOT_FOUND
-
-    # Otherwise, give Mistral access to live database tools to query directly
-    async def run_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-        return await tools.run(name, args, user)
-
-    try:
-        specs = [s for s in tools.TOOL_SPECS if tools.allowed(s["name"], user)]
-        return await llm.chat_with_tools(question, history, specs, run_tool, "")
-    except Exception:
-        return NOT_FOUND
-
-
-
 def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen, out = set(), []
     for i in items:
-        k = (i["type"], i["id"])
+        k = (i.get("type"), i.get("id"))
         if k not in seen:
             seen.add(k)
             out.append(i)
@@ -236,7 +228,8 @@ async def ai_daily_summary(branch: Optional[str] = None) -> Optional[str]:
         return None
     try:
         return await llm.rewrite(
-            "Rewrite as a short, clear morning briefing for the MD. Keep every figure exactly.",
+            "Write a sharp morning briefing for the MD: one-line headline, key figures kept exactly, "
+            "then the top 3 risks or actions needing attention.",
             facts,
         )
     except Exception:
@@ -250,9 +243,7 @@ async def daily(branch: Optional[str] = None) -> dict[str, str]:
     return {"text": await dash.daily_summary(branch), "source": "data"}
 
 
-async def project_summary(
-    project_id: str, user: dict[str, Any]
-) -> Optional[dict[str, Any]]:
+async def project_summary(project_id: str, user: dict[str, Any]) -> Optional[dict[str, Any]]:
     p = await get_db().projects.find_one({"_id": project_id})
     if not p:
         return None
@@ -262,7 +253,8 @@ async def project_summary(
         try:
             text, source = (
                 await llm.rewrite(
-                    "Summarise this project for a manager in 3 sentences. Keep every figure exactly.",
+                    "Summarise this project for a manager in 3 sentences, keep every figure exactly, "
+                    "and end with the single biggest risk or next action.",
                     r["text"],
                 ),
                 "ai",

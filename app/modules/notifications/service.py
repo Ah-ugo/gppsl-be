@@ -29,7 +29,14 @@ async def notify(
 
 
 async def user_ids_by_role(*roles: str) -> list[str]:
-    rows = await get_db().users.find({"role": {"$in": list(roles)}, "active": {"$ne": False}}).to_list(500)
+    role_list = list(roles)
+    rows = await get_db().users.find({
+        "$or": [
+            {"role": {"$in": role_list}},
+            {"roles": {"$in": role_list}},
+        ],
+        "active": {"$ne": False},
+    }).to_list(500)
     return [r["_id"] for r in rows]
 
 

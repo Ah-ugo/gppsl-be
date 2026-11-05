@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
-from app.core.common import clean, clean_many, new_id, today, utcnow, utcnow_iso
+from app.core.common import branch_query, clean, clean_many, new_id, scoped_branch_query, today, utcnow, utcnow_iso
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
 from app.modules.audit import log
@@ -15,7 +15,7 @@ from . import service
 from .schemas import ClockIn, ManualIn, ReviewIn
 
 router = APIRouter(tags=["attendance"], dependencies=[Depends(get_current_user)])
-ALL = ("md", "admin", "finance", "supervisor", "storekeeper", "hr", "branch_manager")
+ALL = ("md", "admin", "finance", "supervisor", "storekeeper", "hr", "branch_manager", "staff")
 SUPERVISE = ("md", "admin", "hr", "supervisor", "branch_manager")
 
 
@@ -101,12 +101,12 @@ async def mine(user: dict = Depends(get_current_user)):
 
 
 @router.get("/attendance/today")
-async def live(branch: Optional[str] = None, _: dict = Depends(require_roles(*SUPERVISE))):
+async def live(branch: Optional[str] = None, user: dict = Depends(require_roles(*SUPERVISE))):
     """Live board: who is in, late, absent, flagged, with selfie thumbnails."""
     db = get_db()
     t = today().isoformat()
     hour, grace = await service.shift_cfg()
-    staff = await db.staff.find({"branch": branch} if branch else {}).sort("name", 1).to_list(5000)
+    staff = await db.staff.find(scoped_branch_query(user, branch)).sort("name", 1).to_list(5000)
     recs = {r["staff_id"]: r for r in await db.attendance.find({"date": t}).to_list(5000)}
     rows = []
     for s in staff:
@@ -171,8 +171,13 @@ async def manual(body: ManualIn, request: Request, user: dict = Depends(require_
 
 
 @router.get("/attendance")
-async def history(staff_id: Optional[str] = None, month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"), status: Optional[str] = None,
-                  _: dict = Depends(require_roles(*SUPERVISE))):
+async def history(
+    staff_id: Optional[str] = None,
+    month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    status: Optional[str] = None,
+    branch: Optional[str] = None,
+    user: dict = Depends(require_roles(*SUPERVISE)),
+):
     q: dict[str, Any] = {}
     if staff_id:
         q["staff_id"] = staff_id
@@ -180,6 +185,9 @@ async def history(staff_id: Optional[str] = None, month: Optional[str] = Query(N
         q["date"] = {"$regex": f"^{month}"}
     if status:
         q["status"] = status
+    bq = scoped_branch_query(user, branch)
+    if bq:
+        q.update(bq)
     return clean_many(await get_db().attendance.find(q).sort("date", -1).to_list(3000))
 
 

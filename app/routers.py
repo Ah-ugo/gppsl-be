@@ -14,6 +14,7 @@ from app.modules.projects.reports import router as reports_router
 from app.modules.projects.router import router as projects_router
 from app.modules.staff.attendance import router as attendance_router
 from app.modules.staff.router import router as staff_router
+from app.modules.trash.router import router as trash_router
 
 extra_routers: list = [
     crm_router,
@@ -31,4 +32,5 @@ extra_routers: list = [
     attendance_router,
     documents_router,
     ai_router,
+    trash_router,
 ]

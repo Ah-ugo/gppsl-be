@@ -34,16 +34,31 @@ def reset_rate_limits() -> None:
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
-    return {k: user.get(k) for k in ("name", "email", "role", "branch", "phone", "active")} | {
-        "id": user.get("_id") or user.get("id")
+    roles = user.get("roles") or ([user["role"]] if user.get("role") else ["staff"])
+    primary_role = user.get("role") or (roles[0] if roles else "staff")
+    is_super = primary_role in {"admin", "md", "director"} or any(r in {"admin", "md", "director"} for r in roles)
+    branch_access = user.get("branch_access")
+    if not branch_access:
+        branch_access = ["all"] if is_super else ([user.get("branch")] if user.get("branch") else ["all"])
+    return {
+        "id": user.get("_id") or user.get("id"),
+        "name": user.get("name"),
+        "email": user.get("email"),
+        "role": primary_role,
+        "roles": roles,
+        "branch": user.get("branch"),
+        "branch_access": branch_access,
+        "phone": user.get("phone"),
+        "active": user.get("active", True),
     }
 
 
 def issue_tokens(user: dict[str, Any]) -> dict[str, Any]:
     uid = user.get("_id") or user.get("id")
+    primary_role = user.get("role") or (user.get("roles", ["staff"])[0])
     return {
-        "access_token": create_access_token(uid, user["role"]),
-        "refresh_token": create_refresh_token(uid, user["role"]),
+        "access_token": create_access_token(uid, primary_role),
+        "refresh_token": create_refresh_token(uid, primary_role),
         "token_type": "bearer",
         "user": public_user(user),
     }

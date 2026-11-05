@@ -2,11 +2,12 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.core.common import clean, clean_many, new_id, today, utcnow_iso
+from app.core.common import branch_query, clean, clean_many, new_id, scoped_branch_query, today, utcnow_iso
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
 from app.logic import can_assign, payroll_days
+from app.core.security import hash_password
 from app.modules.audit import log
 from app.modules.notifications import notify_roles
 
@@ -18,36 +19,190 @@ from .schemas import (
     FaceRegisterIn,
     SiteIn,
     SiteUpdate,
+    StaffAccountIn,
     StaffCreate,
     StaffUpdate,
 )
 
 router = APIRouter(tags=["staff"], dependencies=[Depends(get_current_user)])
-ALL = ("md", "admin", "finance", "supervisor", "storekeeper", "hr", "branch_manager")
+ALL = ("md", "admin", "finance", "supervisor", "storekeeper", "hr", "branch_manager", "staff")
 PEOPLE = ("md", "admin", "hr", "supervisor", "branch_manager")
 
 
 # ---- Staff ----------------------------------------------------------------------------------
 @router.get("/staff")
-async def list_staff(branch: Optional[str] = None, _: dict = Depends(require_roles(*PEOPLE))):
-    rows = await get_db().staff.find({"branch": branch} if branch else {}).sort("name", 1).to_list(2000)
-    return [service.public_staff(r) for r in rows]
+async def list_staff(branch: Optional[str] = None, user: dict = Depends(require_roles(*PEOPLE))):
+    db = get_db()
+    rows = await db.staff.find(scoped_branch_query(user, branch)).sort("name", 1).to_list(2000)
+    users = {u["_id"]: u for u in await db.users.find({}).to_list(2000)}
+    return [service.public_staff(r, user=users.get(r.get("user_id"))) for r in rows]
 
 
 @router.post("/staff", status_code=201)
 async def create_staff(body: StaffCreate, request: Request, user: dict = Depends(require_roles("md", "admin", "hr", "branch_manager"))):
-    doc = {"_id": new_id(), **body.model_dump(), "face_template": [], "face_consent": {"given": False, "date": None},
+    db = get_db()
+    data = body.model_dump()
+    password = data.pop("password", None)
+    role = data.pop("role", None)
+    roles = data.pop("roles", None)
+    create_account = data.pop("create_account", False)
+    
+    user_id = data.get("user_id")
+    if (create_account or password) and data.get("email"):
+        email = data["email"].strip().lower()
+        existing_user = await db.users.find_one({"email": email})
+        assigned_roles = [r for r in (roles or ([role] if role else ["staff"])) if r]
+        primary_role = role or (assigned_roles[0] if assigned_roles else "staff")
+        if existing_user:
+            user_id = existing_user["_id"]
+        else:
+            if not password:
+                password = "Staff@1234"
+            user_id = new_id()
+            user_doc = {
+                "_id": user_id,
+                "email": email,
+                "name": data["name"],
+                "role": primary_role,
+                "roles": assigned_roles,
+                "branch": data.get("branch"),
+                "branch_access": data.get("branch_access", ["all"]),
+                "phone": data.get("phone"),
+                "active": True,
+                "password_hash": hash_password(password),
+                "created_at": utcnow_iso(),
+            }
+            await db.users.insert_one(user_doc)
+
+    doc = {"_id": new_id(), **data, "user_id": user_id, "face_template": [], "face_consent": {"given": False, "date": None},
            "face_status": "none", "certifications": [], "created_at": utcnow_iso()}
-    await get_db().staff.insert_one(doc)
+    await db.staff.insert_one(doc)
     await log(user, "create", "staff", doc["_id"], f"Created staff profile {body.name}", client_ip(request))
-    return service.public_staff(doc)
+    linked_u = await db.users.find_one({"_id": user_id}) if user_id else None
+    return service.public_staff(doc, user=linked_u)
 
 
-# ---- Certifications (declared before /staff/{staff_id} so path doesn't get shadowed) ---------
+@router.post("/staff/{staff_id}/account")
+async def manage_staff_account(
+    staff_id: str,
+    body: StaffAccountIn,
+    request: Request,
+    user: dict = Depends(require_roles("md", "admin", "hr", "branch_manager")),
+):
+    db = get_db()
+    s = await db.staff.find_one({"_id": staff_id})
+    if not s:
+        raise HTTPException(404, "Staff profile not found")
+
+    email = body.email.strip().lower()
+    assigned_roles = [r for r in (body.roles or ([body.role] if body.role else ["staff"])) if r]
+    primary_role = body.role or (assigned_roles[0] if assigned_roles else "staff")
+
+    linked_user = await db.users.find_one({"_id": s.get("user_id")}) if s.get("user_id") else None
+    if not linked_user:
+        linked_user = await db.users.find_one({"email": email})
+
+    if linked_user:
+        patch = {
+            "name": s["name"],
+            "email": email,
+            "role": primary_role,
+            "roles": assigned_roles,
+            "branch": s.get("branch") or linked_user.get("branch"),
+            "branch_access": s.get("branch_access", ["all"]),
+            "phone": s.get("phone") or linked_user.get("phone"),
+            "active": body.active,
+        }
+        if body.password:
+            patch["password_hash"] = hash_password(body.password)
+        await db.users.update_one({"_id": linked_user["_id"]}, {"$set": patch})
+        user_id = linked_user["_id"]
+        action_msg = f"Updated login credentials for staff {s['name']} ({', '.join(assigned_roles)})"
+    else:
+        if not body.password:
+            raise HTTPException(422, "A password of at least 8 characters is required to create a new account")
+        user_id = new_id()
+        user_doc = {
+            "_id": user_id,
+            "email": email,
+            "name": s["name"],
+            "role": primary_role,
+            "roles": assigned_roles,
+            "branch": s.get("branch"),
+            "branch_access": s.get("branch_access", ["all"]),
+            "phone": s.get("phone"),
+            "active": body.active,
+            "password_hash": hash_password(body.password),
+            "created_at": utcnow_iso(),
+        }
+        await db.users.insert_one(user_doc)
+        action_msg = f"Provisioned login account for staff {s['name']} ({', '.join(assigned_roles)})"
+
+    await db.staff.update_one({"_id": staff_id}, {"$set": {"user_id": user_id, "email": email}})
+    await log(user, "update", "staff", staff_id, action_msg, client_ip(request))
+
+    updated_staff = await db.staff.find_one({"_id": staff_id})
+    updated_user = await db.users.find_one({"_id": user_id})
+    return service.public_staff(updated_staff, user=updated_user)
+
+
+@router.delete("/staff/{staff_id}/account")
+async def disable_staff_account(
+    staff_id: str,
+    request: Request,
+    user: dict = Depends(require_roles("md", "admin", "hr")),
+):
+    db = get_db()
+    s = await db.staff.find_one({"_id": staff_id})
+    if not s:
+        raise HTTPException(404, "Staff profile not found")
+    if s.get("user_id"):
+        await db.users.update_one({"_id": s["user_id"]}, {"$set": {"active": False}})
+        await log(user, "update", "staff", staff_id, f"Disabled login access for staff {s['name']}", client_ip(request))
+    return {"ok": True, "message": f"Login access disabled for {s['name']}"}
+
+
+# ---- Certifications & Self Endpoints (declared before /staff/{staff_id} so paths don't get shadowed) ---------
 @router.get("/staff/certifications")
-async def cert_matrix(branch: Optional[str] = None, _: dict = Depends(require_roles(*PEOPLE))):
-    rows = await get_db().staff.find({"branch": branch} if branch else {}).sort("name", 1).to_list(2000)
+async def cert_matrix(branch: Optional[str] = None, user: dict = Depends(require_roles(*PEOPLE))):
+    rows = await get_db().staff.find(scoped_branch_query(user, branch)).sort("name", 1).to_list(2000)
     return [{"id": r["_id"], "name": r["name"], "position": r.get("position"), "branch": r.get("branch"), "certs": service.cert_matrix_row(r)} for r in rows]
+
+
+@router.get("/staff/me")
+async def me(user: dict = Depends(get_current_user)):
+    s = await service.my_staff(user)
+    out = service.public_staff(s)
+    out["sites"] = [{"name": x["name"], "lat": x["lat"], "lng": x["lng"], "radius_m": x["radius_m"]} for x in await service.candidate_sites(s)]
+    t = today().isoformat()
+    rec = await get_db().attendance.find_one({"staff_id": s["_id"], "date": t})
+    out["today"] = clean(rec) if rec else None
+    out["face_threshold"] = get_settings().face_threshold
+    return out
+
+
+@router.post("/staff/me/face")
+async def register_face(body: FaceRegisterIn, request: Request, user: dict = Depends(get_current_user)):
+    """Store descriptors ONLY (never photos), with explicit consent. HR must approve before they are used."""
+    if not body.consent:
+        raise HTTPException(422, "Explicit consent is required to register your face (NDPA 2023)")
+    if len(body.descriptors) != 3 or any(len(d) != 128 for d in body.descriptors):
+        raise HTTPException(422, "Provide exactly 3 face descriptors of 128 numbers each")
+    s = await service.my_staff(user)
+    await get_db().staff.update_one({"_id": s["_id"]}, {"$set": {"face_template": body.descriptors, "face_status": "pending",
+                                    "face_consent": {"given": True, "date": utcnow_iso(), "purpose": "Attendance verification only"}}})
+    await log(user, "create", "staff", s["_id"], f"{s['name']} registered face (consent given), awaiting HR approval", client_ip(request))
+    await notify_roles(["hr"], "Face registration to approve", f"{s['name']} registered their face for attendance", "/staff")
+    return {"status": "pending", "message": "Saved. HR will approve your registration."}
+
+
+@router.delete("/staff/me/face")
+async def withdraw_face(request: Request, user: dict = Depends(get_current_user)):
+    """Right to withdraw: deletes the stored descriptors."""
+    s = await service.my_staff(user)
+    await get_db().staff.update_one({"_id": s["_id"]}, {"$set": {"face_template": [], "face_status": "none", "face_consent": {"given": False, "date": None}}})
+    await log(user, "update", "staff", s["_id"], f"{s['name']} withdrew face consent, descriptors deleted", client_ip(request))
+    return {"ok": True}
 
 
 @router.get("/staff/{staff_id}")
@@ -86,6 +241,20 @@ async def update_staff(
     if not patch:
         raise HTTPException(422, "Nothing to update")
     await db.staff.update_one({"_id": staff_id}, {"$set": patch})
+    if s.get("user_id"):
+        user_sync = {}
+        if "branch_access" in patch:
+            user_sync["branch_access"] = patch["branch_access"]
+        if "branch" in patch:
+            user_sync["branch"] = patch["branch"]
+        if "name" in patch:
+            user_sync["name"] = patch["name"]
+        if "email" in patch:
+            user_sync["email"] = patch["email"].strip().lower()
+        if "phone" in patch:
+            user_sync["phone"] = patch["phone"]
+        if user_sync:
+            await db.users.update_one({"_id": s["user_id"]}, {"$set": user_sync})
     await log(user, "update", "staff", staff_id, f"Updated staff {s['name']}: {', '.join(patch)}", client_ip(request))
     return service.public_staff(await db.staff.find_one({"_id": staff_id}))
 
@@ -103,42 +272,6 @@ async def delete_staff(
     await db.staff.update_one({"_id": staff_id}, {"$set": {"active": False, "deleted_at": utcnow_iso()}})
     await log(user, "delete", "staff", staff_id, f"Deactivated staff {s['name']}", client_ip(request))
     return {"ok": True, "message": f"Staff profile {s['name']} deactivated"}
-
-
-@router.get("/staff/me")
-async def me(user: dict = Depends(get_current_user)):
-    s = await service.my_staff(user)
-    out = service.public_staff(s)
-    out["sites"] = [{"name": x["name"], "lat": x["lat"], "lng": x["lng"], "radius_m": x["radius_m"]} for x in await service.candidate_sites(s)]
-    t = today().isoformat()
-    rec = await get_db().attendance.find_one({"staff_id": s["_id"], "date": t})
-    out["today"] = clean(rec) if rec else None
-    out["face_threshold"] = get_settings().face_threshold
-    return out
-
-
-@router.post("/staff/me/face")
-async def register_face(body: FaceRegisterIn, request: Request, user: dict = Depends(get_current_user)):
-    """Store descriptors ONLY (never photos), with explicit consent. HR must approve before they are used."""
-    if not body.consent:
-        raise HTTPException(422, "Explicit consent is required to register your face (NDPA 2023)")
-    if len(body.descriptors) != 3 or any(len(d) != 128 for d in body.descriptors):
-        raise HTTPException(422, "Provide exactly 3 face descriptors of 128 numbers each")
-    s = await service.my_staff(user)
-    await get_db().staff.update_one({"_id": s["_id"]}, {"$set": {"face_template": body.descriptors, "face_status": "pending",
-                                    "face_consent": {"given": True, "date": utcnow_iso(), "purpose": "Attendance verification only"}}})
-    await log(user, "create", "staff", s["_id"], f"{s['name']} registered face (consent given), awaiting HR approval", client_ip(request))
-    await notify_roles(["hr"], "Face registration to approve", f"{s['name']} registered their face for attendance", "/staff")
-    return {"status": "pending", "message": "Saved. HR will approve your registration."}
-
-
-@router.delete("/staff/me/face")
-async def withdraw_face(request: Request, user: dict = Depends(get_current_user)):
-    """Right to withdraw: deletes the stored descriptors."""
-    s = await service.my_staff(user)
-    await get_db().staff.update_one({"_id": s["_id"]}, {"$set": {"face_template": [], "face_status": "none", "face_consent": {"given": False, "date": None}}})
-    await log(user, "update", "staff", s["_id"], f"{s['name']} withdrew face consent, descriptors deleted", client_ip(request))
-    return {"ok": True}
 
 
 @router.post("/staff/{staff_id}/face/decision")

@@ -1,24 +1,20 @@
-"""Professional invoice and receipt PDF generation using reportlab.
-Produces a fully data-driven PDF — not a screenshot of the UI.
+"""Professional invoice and client statement PDF generation matching corporate institutional styling.
+Produces a fully data-driven vector PDF adhering to the reference statement layout.
 """
 from __future__ import annotations
 
 import io
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
 
 
-# ── helpers ────────────────────────────────────────────────────────────────────
-
 def _naira(v: float) -> str:
-    return f"\u20a6{v:,.2f}"
+    return f"NGN {v:,.2f}"
 
 
 def _safe(v: Any, default: str = "N/A") -> str:
-    return str(v).strip() if v else default
+    return str(v).strip() if v is not None and str(v).strip() else default
 
-
-# ── PDF generator ───────────────────────────────────────────────────────────────
 
 async def build_invoice_pdf(
     invoice: dict,
@@ -26,7 +22,7 @@ async def build_invoice_pdf(
     receipts: list[dict],
     company: dict,
 ) -> bytes:
-    """Generates a professional A4 PDF invoice with optional receipts section."""
+    """Generates an institutional A4 PDF invoice / statement matching the reference design."""
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
@@ -41,381 +37,268 @@ async def build_invoice_pdf(
             TableStyle,
         )
     except ImportError:
-        raise RuntimeError(
-            "reportlab is required for PDF generation. "
-            "Install it: pip install reportlab"
-        )
+        raise RuntimeError("reportlab is required for PDF generation. Install it: pip install reportlab")
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
         pagesize=A4,
-        rightMargin=1.5 * cm,
-        leftMargin=1.5 * cm,
-        topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
+        rightMargin=1.2 * cm,
+        leftMargin=1.2 * cm,
+        topMargin=1.2 * cm,
+        bottomMargin=1.2 * cm,
     )
 
     styles = getSampleStyleSheet()
-    # Colour palette
-    DARK = colors.HexColor("#1a1a2e")
-    ACCENT = colors.HexColor("#1565C0")
-    LIGHT = colors.HexColor("#E3F2FD")
-    GRAY = colors.HexColor("#78909C")
+    DARK = colors.HexColor("#1A1A1A")
+    MUTED = colors.HexColor("#555555")
+    LIGHT_GRAY = colors.HexColor("#EAEAEA")
+    BORDER_GRAY = colors.HexColor("#CCCCCC")
     WHITE = colors.white
-    RED = colors.HexColor("#C62828")
-    GREEN = colors.HexColor("#2E7D32")
+    PRIMARY = colors.HexColor("#0B3B24")
 
-    h1 = ParagraphStyle("h1", parent=styles["Normal"], fontSize=22, textColor=WHITE, fontName="Helvetica-Bold")
-    h2 = ParagraphStyle("h2", parent=styles["Normal"], fontSize=11, textColor=DARK, fontName="Helvetica-Bold")
-    body = ParagraphStyle("body", parent=styles["Normal"], fontSize=9, textColor=DARK, leading=13)
-    small = ParagraphStyle("small", parent=styles["Normal"], fontSize=8, textColor=GRAY)
-    right = ParagraphStyle("right", parent=styles["Normal"], fontSize=9, textColor=DARK, alignment=2)
-    bold_right = ParagraphStyle("bold_right", parent=styles["Normal"], fontSize=10, textColor=DARK, fontName="Helvetica-Bold", alignment=2)
-    accent_right = ParagraphStyle("accent_right", parent=styles["Normal"], fontSize=12, textColor=ACCENT, fontName="Helvetica-Bold", alignment=2)
-    footer_s = ParagraphStyle("footer", parent=styles["Normal"], fontSize=7, textColor=GRAY, alignment=1)
+    # Typography styles
+    title_style = ParagraphStyle("title", parent=styles["Normal"], fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=DARK)
+    meta_label = ParagraphStyle("meta_lbl", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", textColor=DARK)
+    meta_val = ParagraphStyle("meta_val", parent=styles["Normal"], fontSize=8, fontName="Helvetica", textColor=DARK)
+    meta_val_right = ParagraphStyle("meta_val_r", parent=styles["Normal"], fontSize=8, fontName="Helvetica", alignment=2, textColor=DARK)
+    tbl_hdr = ParagraphStyle("tbl_hdr", parent=styles["Normal"], fontSize=7.5, fontName="Helvetica-Bold", textColor=DARK)
+    tbl_hdr_right = ParagraphStyle("tbl_hdr_r", parent=styles["Normal"], fontSize=7.5, fontName="Helvetica-Bold", alignment=2, textColor=DARK)
+    tbl_cell = ParagraphStyle("tbl_cell", parent=styles["Normal"], fontSize=7.5, fontName="Helvetica", textColor=DARK)
+    tbl_cell_right = ParagraphStyle("tbl_cell_r", parent=styles["Normal"], fontSize=7.5, fontName="Helvetica", alignment=2, textColor=DARK)
+    tbl_bold_right = ParagraphStyle("tbl_b_r", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", alignment=2, textColor=DARK)
+    footer_hdr = ParagraphStyle("f_hdr", parent=styles["Normal"], fontSize=7.5, fontName="Helvetica-Bold", textColor=DARK)
+    footer_text = ParagraphStyle("f_txt", parent=styles["Normal"], fontSize=6.5, fontName="Helvetica", textColor=MUTED, leading=8.5)
+    footer_contact = ParagraphStyle("f_cnt", parent=styles["Normal"], fontSize=7, fontName="Helvetica", textColor=MUTED, alignment=1)
 
     elements: list = []
 
-    # ── Header Banner ──────────────────────────────────────────────────────────
-    co_name = _safe(company.get("name"), "GPPSL Operations Ltd")
-    co_address = _safe(company.get("address"), "Port Harcourt, Rivers State, Nigeria")
-    co_email = _safe(company.get("email"), "accounts@gppsl.ng")
-    co_phone = _safe(company.get("phone"), "+234 000 000 0000")
-    co_rc = _safe(company.get("rc_number"), "")
-    co_tin = _safe(company.get("tin"), "")
+    # ── 1. Top Section: Official Company Stamp (Left) + Corporate Brand (Right) ────
+    stamp_content = [
+        [Paragraph("<b>GLOBAL PROCESS & PIPELINE</b>", ParagraphStyle("st1", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", alignment=1, textColor=colors.HexColor("#2B4C7E")))],
+        [Paragraph("<b>SERVICES CO. LTD</b>", ParagraphStyle("st2", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", alignment=1, textColor=colors.HexColor("#2B4C7E")))],
+        [Paragraph("Plot 17, Trans-Amadi Industrial Layout", ParagraphStyle("st3", parent=styles["Normal"], fontSize=6.5, alignment=1, textColor=colors.HexColor("#333333")))],
+        [Paragraph("Port Harcourt, Rivers State, Nigeria", ParagraphStyle("st4", parent=styles["Normal"], fontSize=6.5, alignment=1, textColor=colors.HexColor("#333333")))],
+    ]
+    stamp_table = Table(stamp_content, colWidths=[6.2 * cm])
+    stamp_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#8DA4C4")),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+        ("PADDING", (0, 0), (-1, -1), 3),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
 
-    inv_number = _safe(invoice.get("number"), "INV-0001")
+    brand_content = [
+        [Paragraph("<font size='22'><b>GPPSL</b></font>", ParagraphStyle("logo_big", parent=styles["Normal"], alignment=2, fontName="Helvetica-Bold", textColor=PRIMARY))],
+        [Table([[Paragraph("<b>OILFIELD SERVICES & ENGINEERING</b>", ParagraphStyle("sub_b", parent=styles["Normal"], fontSize=6.5, fontName="Helvetica-Bold", textColor=WHITE, alignment=1))]],
+               colWidths=[5.5 * cm],
+               style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), DARK), ("PADDING", (0, 0), (-1, -1), 2)]))],
+    ]
+    brand_table = Table(brand_content, colWidths=[8.5 * cm], hAlign="RIGHT")
+    brand_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+
+    top_row = Table([[stamp_table, brand_table]], colWidths=[8.5 * cm, 9.8 * cm])
+    top_row.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("PADDING", (0, 0), (-1, -1), 0),
+    ]))
+    elements.append(top_row)
+    elements.append(Spacer(1, 0.25 * cm))
+
+    # ── 2. Client Statement / Invoice Title with Double Rules ───────────────────────
+    elements.append(HRFlowable(width="100%", thickness=1.2, color=DARK, spaceBefore=2, spaceAfter=2))
+    elements.append(Paragraph("Client Statement / Official Invoice", title_style))
+    elements.append(HRFlowable(width="100%", thickness=1.2, color=DARK, spaceBefore=2, spaceAfter=5))
+
+    # ── 3. Metadata Section (2-Column Grid) ─────────────────────────────────────────
+    cl = client or {}
+    cl_code = _safe(cl.get("code") or invoice.get("client_code"), "GPPSL-CL-001")
+    cl_name = _safe(cl.get("name") or invoice.get("client_name"), "Valued Client")
+    inv_num = _safe(invoice.get("number"), "INV-0001")
+    cl_email = _safe(cl.get("email"), "accounts@client.com").upper()
+    cl_phone = _safe(cl.get("phone"), "+234 000 000 0000")
     inv_date = _safe(invoice.get("issue_date"), str(date.today()))
     due_date = _safe(invoice.get("due_date"), "")
-    inv_status = _safe(invoice.get("status"), "draft").upper()
+    account_mgr = _safe(invoice.get("project_manager") or invoice.get("account_manager"), "Increase George")
+    print_date = datetime.now().strftime("%d/%m/%Y %I:%M %p")
+
+    meta_left = [
+        [Paragraph(f"<b>{cl_code} - {cl_name.upper()}</b>", meta_label)],
+        [Paragraph(f"<b>Account / Invoice No</b>   {inv_num}", meta_val)],
+        [Paragraph(f"<b>Email Address</b>   {cl_email}", meta_val)],
+        [Paragraph(f"<b>Phone No</b>   {cl_phone}", meta_val)],
+    ]
+    meta_right = [
+        [Paragraph(f"Print Date: {print_date}", meta_val_right)],
+        [Paragraph(f"<b>Account / Project Lead</b>   {account_mgr}", meta_val_right)],
+        [Paragraph(f"Reporting Period: {inv_date} to {due_date or 'On Completion'}", meta_val_right)],
+        [Paragraph(f"Payment Terms: {_safe(invoice.get('payment_terms'), 'Net 30 Days')}", meta_val_right)],
+    ]
+    meta_table = Table([[Table(meta_left, colWidths=[9.5 * cm], style=TableStyle([("PADDING", (0, 0), (-1, -1), 1)])),
+                         Table(meta_right, colWidths=[8.8 * cm], style=TableStyle([("PADDING", (0, 0), (-1, -1), 1)]))]],
+                       colWidths=[9.5 * cm, 8.8 * cm])
+    meta_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 0)]))
+    elements.append(meta_table)
+    elements.append(Spacer(1, 0.25 * cm))
+
+    # ── 4. Valuation & Summary Highlight Box ───────────────────────────────────────
     amount = float(invoice.get("amount") or 0)
+    subtotal = float(invoice.get("subtotal") or amount)
+    vat_amount = float(invoice.get("vat_amount") or 0)
     paid = float(invoice.get("paid_amount") or 0)
     outstanding = max(0.0, amount - paid)
 
-    status_color = GREEN if inv_status in ("PAID",) else (GRAY if inv_status in ("DRAFT",) else (RED if outstanding > 0 else ACCENT))
-
-    # Header table: company info + invoice meta
-    header_data = [
-        [
-            # Left: company brand
-            Table(
-                [
-                    [Paragraph(co_name, h1)],
-                    [Paragraph(f"{co_address}", small)],
-                    [Paragraph(f"✉ {co_email}  |  ☎ {co_phone}", small)],
-                    [Paragraph(f"RC: {co_rc}  |  TIN: {co_tin}", small) if co_rc or co_tin else Spacer(1, 1)],
-                ],
-                colWidths=[9 * cm],
-                style=TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, -1), ACCENT),
-                    ("PADDING", (0, 0), (-1, -1), 8),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ]),
-            ),
-            # Right: INVOICE label + details
-            Table(
-                [
-                    [Paragraph("<b>INVOICE</b>", ParagraphStyle("inv", parent=styles["Normal"], fontSize=28, textColor=ACCENT, fontName="Helvetica-Bold", alignment=2))],
-                    [Paragraph(f"<b>{inv_number}</b>", ParagraphStyle("invn", parent=styles["Normal"], fontSize=10, textColor=DARK, fontName="Helvetica-Bold", alignment=2))],
-                    [Paragraph(f"Issue Date: {inv_date}", right)],
-                    [Paragraph(f"Due Date: {due_date}", right) if due_date else Spacer(1, 1)],
-                    [Table([[Paragraph(f"  {inv_status}  ", ParagraphStyle("st", parent=styles["Normal"], fontSize=9, textColor=WHITE, fontName="Helvetica-Bold", alignment=1))]],
-                           style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), status_color), ("ROUNDEDCORNERS", (0, 0), (-1, -1), 4), ("PADDING", (0, 0), (-1, -1), 4)]))],
-                ],
-                colWidths=[7.5 * cm],
-                style=TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]),
-            ),
-        ]
+    fund_rows = [
+        [Paragraph("<b>FUND / SERVICE PARTICULARS</b>", tbl_hdr), Paragraph("<b>VALUE</b>", tbl_hdr_right)],
+        [Paragraph(_safe(invoice.get("service_type"), "Core Pipeline & Process Operations"), tbl_cell), Paragraph(_naira(subtotal), tbl_cell_right)],
+        [Paragraph("VAT & Statutory Charges (7.5%)", tbl_cell), Paragraph(_naira(vat_amount), tbl_cell_right)],
+        [Paragraph("Penalties / Administrative Charges", tbl_cell), Paragraph("NGN 0.00", tbl_cell_right)],
+        [Paragraph("<b>TOTAL VALUATION</b>", tbl_hdr), Paragraph(f"<b>{_naira(amount)}</b>", tbl_hdr_right)],
     ]
-    header_table = Table(header_data, colWidths=[9.5 * cm, 8 * cm])
-    header_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (1, 0), (1, -1), 12),
-    ]))
-    elements.append(header_table)
-    elements.append(Spacer(1, 0.5 * cm))
-
-    # ── Bill To / From ─────────────────────────────────────────────────────────
-    cl = client or {}
-    cl_name = _safe(cl.get("name"), "Client")
-    cl_addr = _safe(cl.get("address"), "")
-    cl_email = _safe(cl.get("email"), "")
-    cl_phone = _safe(cl.get("phone"), "")
-
-    bill_data = [
-        [
-            Table([
-                [Paragraph("<b>BILL TO</b>", ParagraphStyle("bt", parent=styles["Normal"], fontSize=8, textColor=GRAY, fontName="Helvetica-Bold"))],
-                [Paragraph(f"<b>{cl_name}</b>", h2)],
-                [Paragraph(cl_addr, body)] if cl_addr else [],
-                [Paragraph(f"✉ {cl_email}", small)] if cl_email else [],
-                [Paragraph(f"☎ {cl_phone}", small)] if cl_phone else [],
-            ], colWidths=[8.5 * cm], style=TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)])),
-            Table([
-                [Paragraph("<b>PAYMENT DETAILS</b>", ParagraphStyle("pd", parent=styles["Normal"], fontSize=8, textColor=GRAY, fontName="Helvetica-Bold"))],
-                [Paragraph(_safe(company.get("bank_name"), "First Bank Nigeria"), body)],
-                [Paragraph(f"Account: <b>{_safe(company.get('account_number'), '0123456789')}</b>", body)],
-                [Paragraph(f"Account Name: {_safe(company.get('account_name'), co_name)}", body)],
-                [Paragraph(f"Sort Code: {_safe(company.get('sort_code'), '011')}", body)],
-            ], colWidths=[8.5 * cm], style=TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)])),
-        ]
-    ]
-    bill_table = Table(bill_data, colWidths=[9.5 * cm, 8 * cm])
-    bill_table.setStyle(TableStyle([
-        ("BOX", (0, 0), (0, 0), 0.5, colors.HexColor("#CFD8DC")),
-        ("BOX", (1, 0), (1, 0), 0.5, colors.HexColor("#CFD8DC")),
-        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#F5F7FA")),
-        ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#EFF8FF")),
-        ("PADDING", (0, 0), (-1, -1), 8),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-    elements.append(bill_table)
-    elements.append(Spacer(1, 0.4 * cm))
-
-    # ── Description / Notes ────────────────────────────────────────────────────
-    description = invoice.get("description") or invoice.get("notes") or ""
-    if description:
-        elements.append(Paragraph("<b>Description of Services</b>", h2))
-        elements.append(Spacer(1, 0.15 * cm))
-        elements.append(Paragraph(description, body))
-        elements.append(Spacer(1, 0.3 * cm))
-
-    # ── Line items table ───────────────────────────────────────────────────────
-    items = invoice.get("items") or []
-    if items:
-        elements.append(Paragraph("<b>Services / Items</b>", h2))
-        elements.append(Spacer(1, 0.15 * cm))
-        item_header = ["#", "Description", "Qty", "Unit Price", "Amount"]
-        item_rows = [item_header]
-        for i, item in enumerate(items, 1):
-            qty = float(item.get("qty") or item.get("quantity") or 1)
-            unit = float(item.get("unit_price") or item.get("rate") or 0)
-            total_item = qty * unit
-            item_rows.append([
-                str(i),
-                _safe(item.get("description") or item.get("name")),
-                f"{qty:g}",
-                _naira(unit),
-                _naira(total_item),
-            ])
-        item_table = Table(item_rows, colWidths=[0.6 * cm, 9.5 * cm, 1.5 * cm, 2.8 * cm, 2.8 * cm])
-        item_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), ACCENT),
-            ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 9),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [WHITE, colors.HexColor("#F8F9FA")]),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CFD8DC")),
-            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-            ("FONTSIZE", (0, 1), (-1, -1), 8.5),
-            ("PADDING", (0, 0), (-1, -1), 6),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ]))
-        elements.append(item_table)
-        elements.append(Spacer(1, 0.3 * cm))
-
-    # ── Totals ─────────────────────────────────────────────────────────────────
-    vat_rate = float(invoice.get("vat_rate") or 0.075)
-    wht_rate = float(invoice.get("wht_rate") or 0)
-    subtotal = float(invoice.get("subtotal") or amount)
-    vat_amount = float(invoice.get("vat_amount") or 0)
-    wht_amount = float(invoice.get("wht_amount") or 0)
-
-    totals_data: list[list] = []
-    if vat_amount:
-        totals_data.append([Paragraph("Sub-Total:", right), Paragraph(_naira(subtotal), right)])
-        totals_data.append([Paragraph(f"VAT ({vat_rate*100:.1f}%):", right), Paragraph(_naira(vat_amount), right)])
-    if wht_amount:
-        totals_data.append([Paragraph(f"WHT ({wht_rate*100:.1f}%):", right), Paragraph(f"({_naira(wht_amount)})", ParagraphStyle("r2", parent=styles["Normal"], fontSize=9, textColor=RED, alignment=2))])
-    totals_data.append([Paragraph("<b>TOTAL AMOUNT:</b>", bold_right), Paragraph(f"<b>{_naira(amount)}</b>", bold_right)])
-    if paid:
-        totals_data.append([Paragraph("Amount Paid:", right), Paragraph(f"({_naira(paid)})", ParagraphStyle("r3", parent=styles["Normal"], fontSize=9, textColor=GREEN, alignment=2))])
-    totals_data.append([Paragraph("<b>BALANCE DUE:</b>", ParagraphStyle("bal", parent=styles["Normal"], fontSize=11, textColor=ACCENT, fontName="Helvetica-Bold", alignment=2)),
-                        Paragraph(f"<b>{_naira(outstanding)}</b>", accent_right)])
-
-    totals_table = Table(totals_data, colWidths=[10 * cm, 7.2 * cm], hAlign="RIGHT")
-    totals_table.setStyle(TableStyle([
-        ("LINEABOVE", (0, len(totals_data) - 2), (-1, len(totals_data) - 2), 0.8, ACCENT),
-        ("BACKGROUND", (0, len(totals_data) - 1), (-1, -1), LIGHT),
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CFD8DC")),
-        ("PADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, len(totals_data) - 1), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, len(totals_data) - 1), (-1, -1), 8),
-    ]))
-    elements.append(totals_table)
-    elements.append(Spacer(1, 0.5 * cm))
-
-    # ── Terms / Footer ─────────────────────────────────────────────────────────
-    terms = invoice.get("terms") or "Payment due within the agreed terms. Please quote invoice number in all payments."
-    elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CFD8DC")))
-    elements.append(Spacer(1, 0.15 * cm))
-    elements.append(Paragraph("<b>Terms & Conditions</b>", small))
-    elements.append(Paragraph(terms, small))
-    elements.append(Spacer(1, 0.4 * cm))
-    elements.append(Paragraph(
-        f"{co_name}  |  RC: {co_rc}  |  TIN: {co_tin}  |  {co_address}  |  {co_email}",
-        footer_s,
-    ))
-    elements.append(Paragraph("Generated by GPPSL Operations Platform · Confidential", footer_s))
-
-    doc.build(elements)
-    buf.seek(0)
-    return buf.read()
-
-
-async def build_receipt_pdf(
-    receipt: dict,
-    invoice: Optional[dict],
-    client: Optional[dict],
-    company: dict,
-) -> bytes:
-    """Generates a professional A4 receipt PDF."""
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.lib.units import cm
-        from reportlab.platypus import (
-            HRFlowable,
-            Paragraph,
-            SimpleDocTemplate,
-            Spacer,
-            Table,
-            TableStyle,
-        )
-    except ImportError:
-        raise RuntimeError("reportlab is required for PDF generation.")
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        rightMargin=1.5 * cm,
-        leftMargin=1.5 * cm,
-        topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
-    )
-
-    styles = getSampleStyleSheet()
-    DARK = colors.HexColor("#1a1a2e")
-    ACCENT = colors.HexColor("#2E7D32")  # Green for receipts
-    LIGHT = colors.HexColor("#E8F5E9")
-    GRAY = colors.HexColor("#78909C")
-    WHITE = colors.white
-
-    h1 = ParagraphStyle("h1", parent=styles["Normal"], fontSize=22, textColor=WHITE, fontName="Helvetica-Bold")
-    h2 = ParagraphStyle("h2", parent=styles["Normal"], fontSize=11, textColor=DARK, fontName="Helvetica-Bold")
-    body = ParagraphStyle("body", parent=styles["Normal"], fontSize=9, textColor=DARK, leading=13)
-    small = ParagraphStyle("small", parent=styles["Normal"], fontSize=8, textColor=GRAY)
-    right = ParagraphStyle("right", parent=styles["Normal"], fontSize=9, textColor=DARK, alignment=2)
-    footer_s = ParagraphStyle("footer", parent=styles["Normal"], fontSize=7, textColor=GRAY, alignment=1)
-
-    elements: list = []
-
-    co_name = _safe(company.get("name"), "GPPSL Operations Ltd")
-    co_address = _safe(company.get("address"), "Port Harcourt, Rivers State, Nigeria")
-    co_email = _safe(company.get("email"), "accounts@gppsl.ng")
-    co_phone = _safe(company.get("phone"), "+234 000 000 0000")
-    co_rc = _safe(company.get("rc_number"), "")
-
-    rec_num = _safe(receipt.get("receipt_number"), "REC-0001")
-    rec_date = _safe(receipt.get("date"), str(date.today()))
-    amount_paid = float(receipt.get("amount") or 0)
-    payment_method = _safe(receipt.get("payment_method"), "Bank Transfer")
-    reference = _safe(receipt.get("reference"), "")
-    balance = float(receipt.get("balance_remaining") or 0)
-
-    inv = invoice or {}
-    cl = client or {}
-    cl_name = _safe(cl.get("name") or receipt.get("client_name"), "Client")
-
-    # Header
-    header_data = [[
-        Table([
-            [Paragraph(co_name, h1)],
-            [Paragraph(co_address, small)],
-            [Paragraph(f"✉ {co_email}  |  ☎ {co_phone}", small)],
-        ], colWidths=[9 * cm], style=TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), ACCENT),
-            ("PADDING", (0, 0), (-1, -1), 8),
-        ])),
-        Table([
-            [Paragraph("<b>RECEIPT</b>", ParagraphStyle("r", parent=styles["Normal"], fontSize=28, textColor=ACCENT, fontName="Helvetica-Bold", alignment=2))],
-            [Paragraph(f"<b>{rec_num}</b>", ParagraphStyle("rn", parent=styles["Normal"], fontSize=10, textColor=DARK, fontName="Helvetica-Bold", alignment=2))],
-            [Paragraph(f"Date: {rec_date}", right)],
-            [Paragraph(f"Payment Method: {payment_method}", right)],
-            [Paragraph(f"Reference: {reference}", right)] if reference else [Spacer(1, 1)],
-        ], colWidths=[7.5 * cm], style=TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ])),
-    ]]
-    header_table = Table(header_data, colWidths=[9.5 * cm, 8 * cm])
-    header_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (1, 0), (1, -1), 12)]))
-    elements.append(header_table)
-    elements.append(Spacer(1, 0.5 * cm))
-
-    # Received From / Invoice Ref
-    bill_data = [[
-        Table([
-            [Paragraph("<b>RECEIVED FROM</b>", ParagraphStyle("bt", parent=styles["Normal"], fontSize=8, textColor=GRAY, fontName="Helvetica-Bold"))],
-            [Paragraph(f"<b>{cl_name}</b>", h2)],
-            [Paragraph(_safe(cl.get("address"), ""), body)] if cl.get("address") else [],
-            [Paragraph(f"✉ {cl.get('email', '')}", small)] if cl.get("email") else [],
-        ], colWidths=[8.5 * cm], style=TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)])),
-        Table([
-            [Paragraph("<b>INVOICE REFERENCE</b>", ParagraphStyle("pd", parent=styles["Normal"], fontSize=8, textColor=GRAY, fontName="Helvetica-Bold"))],
-            [Paragraph(f"Invoice No: <b>{_safe(receipt.get('invoice_number') or inv.get('number'))}</b>", body)],
-            [Paragraph(f"Invoice Amount: {_naira(float(inv.get('amount') or 0))}", body)] if inv else [],
-            [Paragraph(f"Previously Paid: {_naira(float(inv.get('paid_amount') or 0) - amount_paid)}", body)] if inv else [],
-        ], colWidths=[8.5 * cm], style=TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)])),
-    ]]
-    bill_table = Table(bill_data, colWidths=[9.5 * cm, 8 * cm])
-    bill_table.setStyle(TableStyle([
-        ("BOX", (0, 0), (0, 0), 0.5, colors.HexColor("#CFD8DC")),
-        ("BOX", (1, 0), (1, 0), 0.5, colors.HexColor("#CFD8DC")),
-        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#F5F7FA")),
-        ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#F1FFF4")),
-        ("PADDING", (0, 0), (-1, -1), 8),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-    elements.append(bill_table)
-    elements.append(Spacer(1, 0.5 * cm))
-
-    # Payment Summary
-    payment_rows = [
-        [Paragraph("<b>AMOUNT RECEIVED</b>", ParagraphStyle("amt", parent=styles["Normal"], fontSize=14, textColor=ACCENT, fontName="Helvetica-Bold", alignment=2)),
-         Paragraph(f"<b>{_naira(amount_paid)}</b>", ParagraphStyle("amtv", parent=styles["Normal"], fontSize=18, textColor=ACCENT, fontName="Helvetica-Bold", alignment=2))],
-        [Paragraph("Balance Remaining:", right), Paragraph(f"<b>{_naira(balance)}</b>", ParagraphStyle("bal", parent=styles["Normal"], fontSize=10, textColor=DARK, fontName="Helvetica-Bold", alignment=2))],
-        [Paragraph("Payment Method:", right), Paragraph(payment_method, right)],
-        [Paragraph("Reference:", right), Paragraph(reference, right)] if reference else [Spacer(1, 1), Spacer(1, 1)],
-    ]
-    payment_table = Table(payment_rows, colWidths=[10 * cm, 7.2 * cm], hAlign="RIGHT")
-    payment_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), LIGHT),
-        ("BOX", (0, 0), (-1, -1), 0.8, ACCENT),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.8, ACCENT),
-        ("PADDING", (0, 0), (-1, -1), 8),
+    fund_table = Table(fund_rows, colWidths=[4.8 * cm, 3.2 * cm])
+    fund_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), LIGHT_GRAY),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#D8D8D8")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, BORDER_GRAY),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.8, DARK),
+        ("PADDING", (0, 0), (-1, -1), 2.5),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
-    elements.append(payment_table)
-    elements.append(Spacer(1, 0.5 * cm))
 
-    # Confirmation stamp area
-    if balance == 0:
-        stamp = Table([[Paragraph("✓ PAYMENT IN FULL RECEIVED", ParagraphStyle("stamp", parent=styles["Normal"], fontSize=14, textColor=ACCENT, fontName="Helvetica-Bold", alignment=1))]],
-                      style=TableStyle([("BACKGROUND", (0, 0), (-1, -1), LIGHT), ("BOX", (0, 0), (-1, -1), 1.5, ACCENT), ("PADDING", (0, 0), (-1, -1), 10)]))
-        elements.append(stamp)
-        elements.append(Spacer(1, 0.3 * cm))
+    summary_rows = [
+        [Paragraph("Total Amount Invoiced:", tbl_cell), Paragraph(f"<b>{_naira(amount)}</b>", tbl_cell_right)],
+        [Paragraph("Total Amount Received:", tbl_cell), Paragraph(f"<b>{_naira(paid)}</b>", tbl_cell_right)],
+        [Paragraph("<b>Balance Outstanding:</b>", tbl_hdr), Paragraph(f"<b>{_naira(outstanding)}</b>", tbl_hdr_right)],
+        [Paragraph("Status:", tbl_cell), Paragraph(f"<b>{_safe(invoice.get('status'), 'SENT').upper()}</b>", tbl_cell_right)],
+    ]
+    summary_table = Table(summary_rows, colWidths=[4.8 * cm, 3.5 * cm])
+    summary_table.setStyle(TableStyle([
+        ("PADDING", (0, 0), (-1, -1), 3),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LINEBELOW", (0, 2), (-1, 2), 0.5, BORDER_GRAY),
+    ]))
 
-    # Footer
-    elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CFD8DC")))
+    val_box = Table([[fund_table, summary_table]], colWidths=[8.5 * cm, 9.8 * cm])
+    val_box.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("PADDING", (0, 0), (-1, -1), 0),
+    ]))
+    elements.append(val_box)
+    elements.append(Spacer(1, 0.3 * cm))
+
+    # ── 5. Detailed Line Items Table ───────────────────────────────────────────────
+    items = invoice.get("items") or []
+    if not items:
+        items = [{"description": invoice.get("service_type") or "Oilfield Services & Engineering Support",
+                  "quantity": 1, "unit": "Unit", "rate": subtotal, "amount": subtotal}]
+
+    line_headers = [
+        Paragraph("<b>DATE</b>", tbl_hdr),
+        Paragraph("<b>TRANS / SERVICE TYPE</b>", tbl_hdr),
+        Paragraph("<b>AMOUNT</b>", tbl_hdr_right),
+        Paragraph("<b>PRICE</b>", tbl_hdr_right),
+        Paragraph("<b>UNITS</b>", tbl_hdr_right),
+        Paragraph("<b>TOTAL</b>", tbl_hdr_right),
+        Paragraph("<b>VALUE REF / DETAILS</b>", tbl_hdr),
+    ]
+
+    table_data = [line_headers]
+    # Opening balance line
+    table_data.append([
+        Paragraph(inv_date, tbl_cell),
+        Paragraph("<b>OPENING BAL</b>", tbl_cell),
+        Paragraph("0.00", tbl_cell_right),
+        Paragraph("1.00", tbl_cell_right),
+        Paragraph("0.00", tbl_cell_right),
+        Paragraph("0.00", tbl_cell_right),
+        Paragraph("Opening ledger balance", tbl_cell),
+    ])
+
+    cumulative_units = 0.0
+    for it in items:
+        qty = float(it.get("quantity") or it.get("qty") or 1)
+        rate = float(it.get("rate") or it.get("unit_price") or 0)
+        it_amount = float(it.get("amount") or (qty * rate))
+        cumulative_units += qty
+        table_data.append([
+            Paragraph(inv_date, tbl_cell),
+            Paragraph(_safe(it.get("description")), tbl_cell),
+            Paragraph(f"{it_amount:,.2f}", tbl_cell_right),
+            Paragraph(f"{rate:,.2f}", tbl_cell_right),
+            Paragraph(f"{qty:g}", tbl_cell_right),
+            Paragraph(f"{it_amount:,.2f}", tbl_cell_right),
+            Paragraph(f"{inv_num} | {_safe(it.get('unit'), 'Job')}", tbl_cell),
+        ])
+
+    # Closing balance line
+    table_data.append([
+        Paragraph("", tbl_cell),
+        Paragraph("<b>CLOSING BAL</b>", tbl_hdr),
+        Paragraph(f"<b>{subtotal:,.2f}</b>", tbl_bold_right),
+        Paragraph("1.00", tbl_cell_right),
+        Paragraph(f"<b>{cumulative_units:g}</b>", tbl_bold_right),
+        Paragraph(f"<b>{subtotal:,.2f}</b>", tbl_bold_right),
+        Paragraph(f"<b>Total Settled: {paid:,.2f}</b>", tbl_hdr),
+    ])
+
+    line_table = Table(
+        table_data,
+        colWidths=[1.8 * cm, 4.8 * cm, 2.2 * cm, 1.8 * cm, 1.5 * cm, 2.4 * cm, 3.8 * cm],
+    )
+    line_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D8D8D8")),
+        ("LINEBELOW", (0, 0), (-1, 0), 1, DARK),
+        ("PADDING", (0, 0), (-1, -1), 2.2),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.8, DARK),
+        ("BACKGROUND", (0, -1), (-1, -1), LIGHT_GRAY),
+    ]))
+    elements.append(line_table)
+    elements.append(Spacer(1, 0.4 * cm))
+
+    # ── 6. Multi-Branch Address Footer ─────────────────────────────────────────────
+    footer_cols = [
+        [
+            Paragraph("<b>Lagos</b>", footer_hdr),
+            Paragraph("1, Mekunwen Road, Off Oyinkan Abayomi Drive, Ikoyi, Lagos State", footer_text),
+        ],
+        [
+            Paragraph("<b>Port Harcourt HQ</b>", footer_hdr),
+            Paragraph("Plot 17 Trans-Amadi Industrial Layout, Port Harcourt, Rivers State", footer_text),
+        ],
+        [
+            Paragraph("<b>Abuja</b>", footer_hdr),
+            Paragraph("129, Adetokunbo Ademola Crescent, Wuse II, Abuja FCT", footer_text),
+        ],
+        [
+            Paragraph("<b>Warri</b>", footer_hdr),
+            Paragraph("Enerhen Junction Industrial Yard, Airport Road, Warri, Delta State", footer_text),
+        ],
+    ]
+
+    branch_table = Table(
+        [[Table(c, colWidths=[4.4 * cm], style=TableStyle([("PADDING", (0, 0), (-1, -1), 1)])) for c in footer_cols]],
+        colWidths=[4.5 * cm, 4.6 * cm, 4.5 * cm, 4.5 * cm],
+    )
+    branch_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 0),
+    ]))
+    elements.append(branch_table)
     elements.append(Spacer(1, 0.15 * cm))
-    elements.append(Paragraph(f"{co_name}  |  RC: {co_rc}  |  {co_address}  |  {co_email}", footer_s))
-    elements.append(Paragraph("This is an official receipt issued by GPPSL Operations Platform.", footer_s))
+
+    elements.append(HRFlowable(width="100%", thickness=0.5, color=BORDER_GRAY, spaceBefore=2, spaceAfter=3))
+    elements.append(Paragraph(
+        "For enquiries: Please contact the support and finance unit at <u>accounts@gppsl.com</u> or call us on <b>+234 84 463 800</b>",
+        footer_contact,
+    ))
 
     doc.build(elements)
-    buf.seek(0)
-    return buf.read()
+    return buf.getvalue()

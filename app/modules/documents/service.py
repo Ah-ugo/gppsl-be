@@ -116,7 +116,8 @@ async def _cloudinary_fetch(url: str) -> bytes | None:
 
 async def can_read(doc: dict[str, Any], user: dict[str, Any]) -> bool:
     """allowed_roles filter applied on EVERY read. A named signer can always read the document they must sign."""
-    if user["role"] in ALWAYS_ALL or user["role"] in (doc.get("allowed_roles") or []):
+    user_roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
+    if bool(user_roles & set(ALWAYS_ALL)) or bool(user_roles & set(doc.get("allowed_roles") or [])):
         return True
     return await get_db().signature_requests.find_one({"document_id": doc["_id"], "signers.user_id": user["id"]}) is not None
 
@@ -170,10 +171,11 @@ async def search_chunks(question: str, user: dict[str, Any], k: int = 4) -> list
     qvec, provider = await embeddings.embed(question, s.google_api_key, s.gemini_embedding_model)
     db = get_db()
     scored = []
+    user_roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
     for ch in await db.document_chunks.find({}).to_list(20000):
         if ch.get("provider") != provider:  # never compare vectors from different embedding models
             continue
-        if user["role"] not in ALWAYS_ALL and user["role"] not in (ch.get("allowed_roles") or []):
+        if not (user_roles & set(ALWAYS_ALL)) and not (user_roles & set(ch.get("allowed_roles") or [])):
             continue
         scored.append((embeddings.cosine(qvec, ch["embedding"]), ch))
     scored.sort(key=lambda x: x[0], reverse=True)

@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.core.common import clean, clean_many, new_id, today, utcnow_iso
+from app.core.common import branch_query, clean, clean_many, new_id, today, utcnow_iso
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
 from app.modules.audit import log
@@ -26,8 +26,7 @@ async def list_clients(
     _: dict = Depends(require_roles(*ALL)),
 ):
     q: dict[str, Any] = {}
-    if branch:
-        q["branch"] = branch
+    q.update(branch_query(branch))
     if search:
         q["$or"] = [
             {"name": {"$regex": search, "$options": "i"}},
@@ -87,8 +86,17 @@ async def delete_client(client_id: str, request: Request, user: dict = Depends(r
     open_inv = await get_db().invoices.find_one({"client_id": client_id, "status": {"$in": ["unpaid", "part_paid"]}})
     if open_inv:
         raise HTTPException(409, "Cannot delete a client with open invoices")
-    await get_db().clients.delete_one({"_id": client_id})
-    await log(user, "delete", "client", client_id, f"Deleted client {doc['name']}", client_ip(request))
+    from app.modules.trash.service import move_to_trash
+    await move_to_trash(
+        collection_name="clients",
+        item_id=client_id,
+        user=user,
+        entity_type="client",
+        title=f"Client: {doc.get('name')}",
+        subtitle=f"Code: {doc.get('code', '')} · {doc.get('email', '')}",
+        branch=doc.get("branch"),
+        client_ip_addr=client_ip(request),
+    )
     return {"ok": True}
 
 

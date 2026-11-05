@@ -5,6 +5,14 @@ from pydantic import BaseModel, Field
 CERT_TYPES = ["BOSIET", "HUET", "H2S", "First aid", "Medical", "Equipment licence"]
 
 
+class StaffAccountIn(BaseModel):
+    email: str
+    password: Optional[str] = Field(None, min_length=8)
+    role: Optional[str] = None
+    roles: Optional[list[str]] = None
+    active: bool = True
+
+
 class StaffCreate(BaseModel):
     user_id: Optional[str] = None
     staff_id_code: Optional[str] = None
@@ -18,6 +26,10 @@ class StaffCreate(BaseModel):
     ] = "permanent"
     phone: Optional[str] = None
     email: Optional[str] = None
+    password: Optional[str] = Field(None, min_length=8)
+    role: Optional[str] = None
+    roles: Optional[list[str]] = None
+    create_account: Optional[bool] = False
     gender: Optional[str] = None
     dob: Optional[str] = None
     address: Optional[str] = None
@@ -46,6 +58,8 @@ class StaffUpdate(BaseModel):
     ] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    role: Optional[str] = None
+    roles: Optional[list[str]] = None
     gender: Optional[str] = None
     dob: Optional[str] = None
     address: Optional[str] = None

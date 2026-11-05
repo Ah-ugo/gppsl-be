@@ -6,7 +6,7 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from app.core.common import clean, clean_many, today, utcnow_iso
+from app.core.common import branch_query, clean, clean_many, today, utcnow_iso
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
 from app.modules.audit import log
@@ -100,8 +100,7 @@ async def list_reports(project_id: Optional[str] = None, branch: Optional[str] =
     q: dict[str, Any] = {}
     if project_id:
         q["project_id"] = project_id
-    if branch:
-        q["branch"] = branch
+    q.update(branch_query(branch))
     if date_from or date_to:
         q["date"] = {**({"$gte": date_from} if date_from else {}), **({"$lte": date_to} if date_to else {})}
     rows = await get_db().daily_reports.find(q).sort("date", -1).to_list(limit)
@@ -140,7 +139,9 @@ async def project_summary(project_id: str, user: dict = Depends(require_roles("m
     p = await db.projects.find_one({"_id": project_id})
     if not p:
         raise HTTPException(404, "Project not found")
-    view = await service.view(p, user["role"], await service.client_name_map())
+    user_roles = set(user.get("roles") or ([user["role"]] if user.get("role") else []))
+    is_money = bool(user_roles & set(service.MONEY_ROLES))
+    view = await service.view(p, "md" if is_money else user.get("role", "staff"), await service.client_name_map())
     since = (today() - timedelta(days=7)).isoformat()
     reports = await db.daily_reports.find({"project_id": project_id, "date": {"$gte": since}}).sort("date", -1).to_list(100)
     open_rentals = await db.rentals.find({"project_id": project_id, "actual_return": None}).to_list(200)
@@ -154,7 +155,7 @@ async def project_summary(project_id: str, user: dict = Depends(require_roles("m
                                "expected_return": r.get("expected_return"), "rental_id": r["_id"]} for r in open_rentals],
         "recent_incidents": clean_many(incidents),
     }
-    if user["role"] in service.MONEY_ROLES:
+    if is_money:
         cost = view.get("cost", 0)
         budget = float(p.get("budget") or 0)
         exp = await db.expenses.find({"project_id": project_id, "status": {"$in": ["approved", "paid"]}}).sort("date", -1).to_list(500)

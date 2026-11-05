@@ -25,10 +25,10 @@ class Settings(BaseSettings):
 
     # External services. Every one has a labelled local/mock fallback.
     mistral_api_key: str = ""
-    mistral_model: str = "ministral-8b-latest"
+    mistral_model: str = "mistral-small-latest"
     mistral_embedding_model: str = "mistral-embed"
     google_api_key: str = ""
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-flash-lite-latest"
     gemini_embedding_model: str = "models/text-embedding-004"
     cloudinary_url: str = ""
     upload_dir: str = "uploads"

@@ -39,4 +39,4 @@ async def seed(wipe: bool = True) -> dict:
 if __name__ == "__main__":
     counts = asyncio.run(seed())
     print("Seeded:", counts)
-    print("Demo logins (password Demo@1234): md@gppsl.demo admin@gppsl.demo finance@gppsl.demo supervisor@gppsl.demo storekeeper@gppsl.demo hr@gppsl.demo")
+    print("Demo logins (password Demo@1234): md@gppsl.demo admin@gppsl.demo finance@gppsl.demo supervisor@gppsl.demo storekeeper@gppsl.demo hr@gppsl.demo staff@gppsl.demo")

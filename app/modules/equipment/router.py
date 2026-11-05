@@ -5,7 +5,7 @@ import qrcode
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
-from app.core.common import clean, clean_many, new_id, today, utcnow_iso
+from app.core.common import branch_query, clean, clean_many, new_id, scoped_branch_query, today, utcnow_iso
 from app.core.db import get_db
 from app.core.deps import client_ip, get_current_user, require_roles
 from app.modules.audit import log
@@ -26,18 +26,20 @@ router = APIRouter(tags=["equipment"], dependencies=[Depends(get_current_user)])
 async def list_equipment(
     search: Optional[str] = None, status: Optional[str] = None, category: Optional[str] = None,
     branch: Optional[str] = None, limit: int = Query(500, le=1000),
-    _: dict = Depends(require_roles(*READ)),
+    user: dict = Depends(require_roles(*READ)),
 ):
     q: dict[str, Any] = {}
-    if status:
+    if status and status.lower() not in ("all", ""):
         q["status"] = status
-    if category:
+    if category and category.lower() not in ("all", ""):
         q["category"] = category
-    if branch:
-        q["branch"] = branch
+    bq = scoped_branch_query(user, branch)
+    if bq:
+        q.update(bq)
     if search:
-        q["$or"] = [{"name": {"$regex": search, "$options": "i"}}, {"serial": {"$regex": search, "$options": "i"}},
-                    {"category": {"$regex": search, "$options": "i"}}]
+        s = search.strip()
+        q["$or"] = [{"name": {"$regex": s, "$options": "i"}}, {"serial": {"$regex": s, "$options": "i"}},
+                    {"category": {"$regex": s, "$options": "i"}}]
     rows = await get_db().equipment.find(q).sort("name", 1).to_list(limit)
     names = await service.project_name_map()
     return [service.view(r, names) for r in rows]
@@ -110,8 +112,17 @@ async def delete_equipment(equipment_id: str, request: Request, user: dict = Dep
     eq = await service.get_or_404(equipment_id)
     if eq.get("status") == "deployed":
         raise HTTPException(409, "Cannot delete equipment that is currently deployed")
-    await get_db().equipment.delete_one({"_id": equipment_id})
-    await log(user, "delete", "equipment", equipment_id, f"Deleted equipment {eq['name']} ({eq['serial']})", client_ip(request))
+    from app.modules.trash.service import move_to_trash
+    await move_to_trash(
+        collection_name="equipment",
+        item_id=equipment_id,
+        user=user,
+        entity_type="equipment",
+        title=f"{eq.get('name')} ({eq.get('serial')})",
+        subtitle=f"{eq.get('category')} · {eq.get('branch')}",
+        branch=eq.get("branch"),
+        client_ip_addr=client_ip(request),
+    )
     return {"ok": True}
 
 

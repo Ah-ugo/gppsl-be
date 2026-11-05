@@ -82,3 +82,83 @@ async def test_user_admin_rules(client, auth):
     assert dup.status_code == 409
     bad = await client.post("/users", json={**body, "email": "x@test.ng", "phone": "12345"}, headers=auth("admin"))
     assert bad.status_code == 422
+
+
+async def test_multi_role_user_provisioning_and_access(client, auth):
+    # Admin creates a user with multiple roles: field staff + finance (accounts)
+    body = {
+        "email": "accounts.field@test.ng",
+        "name": "Babatunde Lawal",
+        "roles": ["staff", "finance"],
+        "password": "Password@123",
+        "phone": "0803 456 7890",
+        "branch": "Port Harcourt HQ",
+    }
+    create_res = await client.post("/users", json=body, headers=auth("admin"))
+    assert create_res.status_code == 201
+    user_data = create_res.json()
+    assert user_data["roles"] == ["staff", "finance"]
+    assert user_data["role"] == "staff"
+
+    # User logs in and tokens are issued
+    login_res = await client.post("/auth/login", json={"email": "accounts.field@test.ng", "password": "Password@123"})
+    assert login_res.status_code == 200
+    token = login_res.json()["access_token"]
+    user_header = {"Authorization": f"Bearer {token}"}
+
+    # /auth/me reflects both roles
+    me_res = await client.get("/auth/me", headers=user_header)
+    assert me_res.status_code == 200
+    assert "finance" in me_res.json()["roles"]
+    assert "staff" in me_res.json()["roles"]
+
+    # Since user has "finance" role, they can access finance endpoints
+    fin_res = await client.get("/finance/overview", headers=user_header)
+    assert fin_res.status_code == 200
+
+    # And since they have a linked staff profile, /staff/me returns their profile for attendance
+    staff_me = await client.get("/staff/me", headers=user_header)
+    assert staff_me.status_code == 200
+    assert staff_me.json()["name"] == "Babatunde Lawal"
+
+
+async def test_staff_account_provisioning_endpoint(client, auth):
+    # Create staff profile without login account initially
+    staff_payload = {
+        "name": "Kelechi Danjuma",
+        "position": "Pump Operator",
+        "branch": "Warri",
+        "branch_access": ["all"],
+        "department": "Operations",
+        "employment_type": "contract",
+        "phone": "0805 111 2233",
+        "daily_rate": 18000,
+    }
+    s_res = await client.post("/staff", json=staff_payload, headers=auth("hr"))
+    assert s_res.status_code == 201
+    staff_id = s_res.json()["id"]
+
+    # HR provisions login account with roles ["staff", "supervisor"] for attendance
+    acc_payload = {
+        "email": "kelechi.d@test.ng",
+        "password": "Temporary@1234",
+        "roles": ["staff", "supervisor"],
+    }
+    acc_res = await client.post(f"/staff/{staff_id}/account", json=acc_payload, headers=auth("hr"))
+    assert acc_res.status_code == 200
+    acc_data = acc_res.json()
+    assert acc_data["has_login"] is True
+    assert acc_data["login_email"] == "kelechi.d@test.ng"
+    assert "staff" in acc_data["roles"]
+    assert "supervisor" in acc_data["roles"]
+
+    # The field staff can now log in
+    staff_login = await client.post("/auth/login", json={"email": "kelechi.d@test.ng", "password": "Temporary@1234"})
+    assert staff_login.status_code == 200
+    staff_token = staff_login.json()["access_token"]
+
+    # Field staff can access /staff/me and attendance
+    st_header = {"Authorization": f"Bearer {staff_token}"}
+    my_st = await client.get("/staff/me", headers=st_header)
+    assert my_st.status_code == 200
+    assert my_st.json()["name"] == "Kelechi Danjuma"
